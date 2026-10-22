@@ -1,0 +1,4 @@
+{
+  "description": "crew: reviews by Codex, Antigravity and Claude reviewers",
+  "modules": ["./register.ts"]
+}

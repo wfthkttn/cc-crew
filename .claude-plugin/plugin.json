@@ -1,0 +1,42 @@
+{
+  "name": "crew",
+  "version": "0.1.0",
+  "description": "Reviews by other harnesses' models (Codex, Antigravity) and Claude, under one tool with enforced read limits",
+  "dependencies": ["courier"],
+  "userConfig": {
+    "codex_bin": {
+      "type": "string",
+      "title": "Codex CLI",
+      "description": "Command or absolute path of the Codex CLI",
+      "default": "codex"
+    },
+    "agy_bin": {
+      "type": "string",
+      "title": "Antigravity CLI",
+      "description": "Command or absolute path of the Antigravity CLI",
+      "default": "agy"
+    },
+    "reviewers": {
+      "type": "string",
+      "multiple": true,
+      "title": "Default reviewers",
+      "description": "Providers a review runs when the call names none: codex, antigravity, claude",
+      "default": ["codex", "antigravity", "claude"]
+    },
+    "reviewer_rules": {
+      "type": "string",
+      "multiple": true,
+      "title": "Reviewer rule files",
+      "description": "Absolute paths of Markdown files added to every reviewer's instructions",
+      "default": []
+    },
+    "timeout_s": {
+      "type": "number",
+      "title": "Reviewer timeout (s)",
+      "description": "How long one reviewer may run before it is stopped",
+      "default": 900,
+      "min": 60,
+      "max": 7200
+    }
+  }
+}
