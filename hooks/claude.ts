@@ -154,11 +154,25 @@ export async function begin(io: Io, j: Job, codexBin: string, description: strin
   return arm(io, spawned.agentId, spawned.model, { roots: j.roots, secrets: j.secrets, codexBin }, j)
 }
 
+let resuming = 0
+
+/**
+ * Whether the reviewer types are offered: only while crew resumes one of its reviewers, since the
+ * engine checks the offer on a resume as it does when the model dispatches.
+ */
+export const isOffered = (): boolean => resuming > 0
+
 /** Sends a follow-up; called inside the tool call, as `begin` is. */
 export async function beginFollowUp(io: Io, f: FollowUp, codexBin: string): Promise<Pending> {
   const model = f.model ?? 'inherit'
   const pending = arm(io, f.continueId, model, { roots: f.roots, secrets: f.secrets, codexBin }, f)
-  const sent = await io.send({ to: { agentId: f.continueId }, text: f.message })
+  resuming++
+  let sent
+  try {
+    sent = await io.send({ to: { agentId: f.continueId }, text: f.message })
+  } finally {
+    resuming--
+  }
   if (sent.isDelivered) return pending
   pending.drop()
   return failed(model, `the message did not reach the reviewer: ${sent.reason}`, f.continueId)

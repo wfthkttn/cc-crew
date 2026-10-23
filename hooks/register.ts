@@ -299,8 +299,8 @@ export const register: Register = (on, options) => {
     return started
   })
 
-  on('agent.offer', { agent: 'crew:reviewer' }, () => ({ isOffered: false }))
-  on('agent.offer', { agent: 'crew:reviewer-web' }, () => ({ isOffered: false }))
+  on('agent.offer', { agent: 'crew:reviewer' }, () => ({ isOffered: claude.isOffered() }))
+  on('agent.offer', { agent: 'crew:reviewer-web' }, () => ({ isOffered: claude.isOffered() }))
 
   on('tool.call', { tool: 'mcp__crew__review' }, ($, e, next) => answer(startReview($, fields(e), next.signal)))
   on('tool.call', { tool: 'mcp__crew__review_continue' }, ($, e, next) => answer(continueReview($, fields(e), next.signal)))
