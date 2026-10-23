@@ -4,6 +4,7 @@ import * as agy from '../hooks/antigravity.ts'
 import * as claude from '../hooks/claude.ts'
 import * as codex from '../hooks/codex.ts'
 import type { Job } from '../hooks/job.ts'
+import { settingsFrom, withDefaults } from '../hooks/config.ts'
 import { run } from '../hooks/proc.ts'
 import { parseFindings, renderFindings, systemPrompt, taskText } from '../hooks/prompt.ts'
 import { type Run, execute, keysFor, load, summary } from '../hooks/runs.ts'
@@ -210,6 +211,17 @@ test('an Antigravity review of a file adds its folder and closes the rest of it'
   expect(deny).not.toContain(`read_file(${main})`)
 })
 
+test('an Antigravity review with web on is allowed page reads, which headless runs would refuse; without web they stay denied', async () => {
+  for (const web of [true, false]) {
+    const j = job({ dir: '/r/a', web })
+    const io = fakeIo({ files: FILES, dirs: [...DIRS, '/r', '/r/a', '/r/a/work'], spawn: () => ({ stdout: [agyResult(JSON.stringify(FINDINGS))] }) })
+    await agy.review(io, 'agy', j)
+    const { allow, deny } = JSON.parse(io.files.get(`${j.dir}/home/.gemini/antigravity-cli/settings.json`)!).permissions
+    expect(allow).toEqual(web ? ['read_url(*)'] : [])
+    expect(deny.includes('read_url(*)')).toBe(!web)
+  }
+})
+
 test('an Antigravity run that left its paths is tried once more, warned', async () => {
   const j = job({ dir: '/r/a' })
   const io = fakeIo({
@@ -293,7 +305,7 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
       { provider: 'claude-p', key: 'claude-p-default', status: 'running', dir: '/c/runs/r1/claude-p-default', startedAt: 0 },
     ],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], reviewerRules: [], timeoutMs: 60_000 }
+  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000 }
   const alert = async (_: unknown, provider: string, detail: string) => {
     io.notified.push(`${provider}: ${detail}`)
     return undefined
@@ -341,10 +353,22 @@ test('secret names cover keys, tokens and cloud credentials', () => {
 })
 
 test('the Claude reviewer is held by its own gate on every Read and Bash', () => {
-  const [spec] = claude.agentSpecs('SYS', '/c/approved')
+  const [spec] = claude.agentSpecs('SYS', '/c/approved', undefined)
+  expect('effort' in spec!).toBe(false)
+  expect(claude.agentSpecs('SYS', '/c/approved', 'high').map(s => s.effort)).toEqual(['high', 'high'])
   const pre = (spec!.hooks as { PreToolUse: { matcher: string; hooks: { command: string }[] }[] }).PreToolUse
   expect(pre[0]!.matcher).toBe('Read|Bash')
   expect(pre[0]!.hooks[0]!.command).toContain(`'/c/approved'/"$id"`)
   expect(pre[0]!.hooks[0]!.command).toContain('exit 2')
   expect(claude.approvedMark('/c/approved', 'toolu_1')).toBe('/c/approved/toolu_1')
+})
+
+test("a reviewer runs its provider's configured model and effort unless the call names its own; empty settings leave the tool's default", () => {
+  const s = settingsFrom({ codex_bin: 'codex', agy_bin: 'agy', reviewers: ['codex'], codex_model: '', codex_effort: 'medium', agy_model: 'gemini-4-argon-high', agy_effort: '', claude_model: 'opus', reviewer_rules: [], timeout_s: 900 })
+  expect(withDefaults({ provider: 'codex' }, s.defaults)).toEqual({ provider: 'codex', effort: 'medium' })
+  expect(withDefaults({ provider: 'codex', effort: 'xhigh' }, s.defaults)).toEqual({ provider: 'codex', effort: 'xhigh' })
+  expect(withDefaults({ provider: 'antigravity' }, s.defaults)).toEqual({ provider: 'antigravity', model: 'gemini-4-argon-high' })
+  expect(withDefaults({ provider: 'claude', model: 'haiku' }, s.defaults)).toEqual({ provider: 'claude', model: 'haiku' })
+  expect(withDefaults({ provider: 'claude' }, s.defaults)).toEqual({ provider: 'claude', model: 'opus' })
+  expect(withDefaults({ provider: 'claude-p' }, s.defaults)).toEqual({ provider: 'claude-p' })
 })

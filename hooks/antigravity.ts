@@ -42,7 +42,9 @@ async function settings(io: Io, j: Omit<Job, 'task'>, p: Paths): Promise<string>
   const siblings = await siblingsOf(io, [...j.roots, p.work])
   const deny = ['write_file(*)', ...j.secrets.map(s => `read_file(${s})`), ...siblings.map(s => `read_file(${s})`)]
   if (!j.web) deny.push('read_url(*)')
-  return JSON.stringify({ permissions: { deny } }, null, 2)
+  // Headless runs refuse any tool that would ask for approval; a page read asks unless allowed.
+  const allow = j.web ? ['read_url(*)'] : []
+  return JSON.stringify({ permissions: { deny, allow } }, null, 2)
 }
 
 /** The agent file goes first: it creates the working folder that the deny rules keep open. */

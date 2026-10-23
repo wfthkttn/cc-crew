@@ -7,7 +7,7 @@ import { SECRET_NAME, isInside, parentOf, workFolder } from './scope.ts'
 
 export const AGENT = 'reviewer'
 export const AGENT_WEB = 'reviewer-web'
-export const DEFAULT_MODEL = 'sonnet'
+export const DEFAULT_MODEL = 'opus'
 
 const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`
 
@@ -28,11 +28,13 @@ export function gateCommand(approvedDir: string): string {
 
 export const approvedMark = (approvedDir: string, toolUseId: string) => `${approvedDir}/${toolUseId}`
 
-export function agentSpecs(system: string, approvedDir: string) {
+/** `effort` undefined: the reviewers run at the session's effort. */
+export function agentSpecs(system: string, approvedDir: string, effort: string | undefined) {
   const base = {
     prompt: system,
     omitClaudeMd: true as const,
     maxTurns: 80,
+    ...(effort === undefined ? {} : { effort }),
     hooks: { PreToolUse: [{ matcher: 'Read|Bash', hooks: [{ type: 'command', command: gateCommand(approvedDir) }] }] },
   }
   return [

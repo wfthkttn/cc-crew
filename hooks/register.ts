@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { type ChangeSpec, changeOf } from './changes.ts'
 import * as claude from './claude.ts'
-import { type Provider, type Settings, isProvider, settingsFrom } from './config.ts'
+import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
@@ -17,7 +17,7 @@ Brief it like a colleague who just walked into the room: the reviewers know noth
 
 Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out or out of quota is reported loudly and the others carry on.
 
-Models: codex takes its own model names (default: Codex's default) and effort low|medium|high|xhigh. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku (default sonnet); its effort is the session's.`
+Models: a reviewer whose call names no model or effort runs the configured default for its provider. codex takes its own model names and effort low|medium|high|xhigh|max|ultra. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku; its effort is the configured one, else the session's, and a call cannot set it.`
 
 const REVIEWER_ITEM = {
   type: 'object',
@@ -104,14 +104,14 @@ function str(f: Fields, key: string): string {
 }
 
 function reviewersOf(f: Fields): ReviewerSpec[] {
-  if (f.reviewers === undefined) return settings.reviewers.map(provider => ({ provider }))
+  if (f.reviewers === undefined) return settings.reviewers.map(provider => withDefaults({ provider }, settings.defaults))
   if (!Array.isArray(f.reviewers) || f.reviewers.length === 0) throw new BadInput('reviewers must be a non-empty list')
   return f.reviewers.map((r: Fields) => {
     if (typeof r.provider !== 'string' || !isProvider(r.provider)) throw new BadInput(`unknown provider: ${String(r.provider)}`)
     const spec: ReviewerSpec = { provider: r.provider as Provider }
     if (typeof r.model === 'string') spec.model = r.model
     if (typeof r.effort === 'string') spec.effort = r.effort
-    return spec
+    return withDefaults(spec, settings.defaults)
   })
 }
 
@@ -292,7 +292,7 @@ export const register: Register = (on, options) => {
     cacheDir = `${home}/.cache/crew`
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
-    for (const spec of claude.agentSpecs(system, approvedDir())) await $.agent.register(spec)
+    for (const spec of claude.agentSpecs(system, approvedDir(), settings.defaults.claude?.effort)) await $.agent.register(spec)
     await $.tool.register({ name: 'review', description: REVIEW_DESCRIPTION, inputSchema: REVIEW_SCHEMA, isDeferred: false })
     await $.tool.register({
       name: 'review_continue',

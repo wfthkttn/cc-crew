@@ -23,6 +23,42 @@
       "description": "Providers a review runs when the call names none: codex, antigravity, claude",
       "default": ["codex", "antigravity", "claude"]
     },
+    "codex_model": {
+      "type": "string",
+      "title": "Codex model",
+      "description": "Model a Codex reviewer runs when the call names none; empty for Codex's default",
+      "default": ""
+    },
+    "codex_effort": {
+      "type": "string",
+      "title": "Codex reasoning effort",
+      "description": "Reasoning effort a Codex reviewer runs at when the call names none; empty for the model's default",
+      "default": "medium"
+    },
+    "agy_model": {
+      "type": "string",
+      "title": "Antigravity model",
+      "description": "Model id an Antigravity reviewer runs when the call names none; empty for Antigravity's default",
+      "default": ""
+    },
+    "agy_effort": {
+      "type": "string",
+      "title": "Antigravity effort",
+      "description": "Effort an Antigravity reviewer runs at when the call names none; empty for the model's default",
+      "default": ""
+    },
+    "claude_model": {
+      "type": "string",
+      "title": "Claude reviewer model",
+      "description": "sonnet, opus or haiku: the Claude reviewer's model when the call names none",
+      "default": "opus"
+    },
+    "claude_effort": {
+      "type": "string",
+      "title": "Claude reviewer effort",
+      "description": "low, medium, high, xhigh or max for every Claude reviewer; empty for the session's effort",
+      "default": "medium"
+    },
     "reviewer_rules": {
       "type": "string",
       "multiple": true,
