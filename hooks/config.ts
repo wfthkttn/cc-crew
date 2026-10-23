@@ -13,6 +13,8 @@ export type Settings = {
   defaults: Partial<Record<Provider, Choice>>
   reviewerRules: string[]
   timeoutMs: number
+  /** Each session's limits before the Limits tab raises them. */
+  limits: { reviewRuns: number; reviewTokens: number; agentTokens: number }
 }
 
 export function isProvider(name: string): name is Provider {
@@ -54,5 +56,10 @@ export function settingsFrom(options: PluginOptions): Settings {
     },
     reviewerRules: [...(options.reviewer_rules as readonly string[])],
     timeoutMs: (options.timeout_s as number) * 1000,
+    limits: {
+      reviewRuns: options.limit_review_runs as number,
+      reviewTokens: options.limit_review_tokens as number,
+      agentTokens: options.limit_agent_tokens as number,
+    },
   }
 }

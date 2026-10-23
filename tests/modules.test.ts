@@ -305,7 +305,7 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
       { provider: 'claude-p', key: 'claude-p-default', status: 'running', dir: '/c/runs/r1/claude-p-default', startedAt: 0 },
     ],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000 }
+  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, limits: { reviewRuns: 9, reviewTokens: 9, agentTokens: 9 } }
   const alert = async (_: unknown, provider: string, detail: string) => {
     io.notified.push(`${provider}: ${detail}`)
     return undefined
@@ -343,7 +343,7 @@ test('a running Codex reviewer stopped from the tab is killed and reads as stopp
     helpers: false,
     reviewers: [reviewer('codex-default'), reviewer('codex-default-2')],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000 }
+  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, limits: { reviewRuns: 9, reviewTokens: 9, agentTokens: 9 } }
   const done = execute(io, r, settings, 'SYS', 'TASK', '/c', async () => undefined, new Map())
   for (let i = 0; i < 10_000 && io.spawned.length < 2; i++) await Promise.resolve()
   expect(stopReviewer('r2', 'codex-default')).toBe(true)

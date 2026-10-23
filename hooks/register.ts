@@ -1,20 +1,21 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { SidebarDrawerSlot, SidebarPopoutSlot, SidebarRowComponent } from 'sidebar'
 
-import { ClaudeAgents, LIVE } from './agents.ts'
+import { ClaudeAgents } from './agents.ts'
 import { wrap } from './brief.ts'
 import { type ChangeSpec, changeOf } from './changes.ts'
 import * as claude from './claude.ts'
 import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
+import { agentRefusal, followUpRefusal, GATES, type Gate, reviewRefusal } from './limits.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
-import type { BriefProps, OverviewProps } from './overview-props.ts'
+import type { BriefProps, Raise, Tab } from './overview-props.ts'
+import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
 import {
   type Alert,
   type ReviewerSpec,
-  type ReviewerState,
   type Run,
   ask,
   beginClaude,
@@ -29,7 +30,8 @@ import {
 } from './runs.ts'
 import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
 import { fillSlot, hasSlot } from './slot.ts'
-import { type Tokens, claudeTokens, shortCount } from './usage.ts'
+import { claudeTokens } from './usage.ts'
+import { RAISE_BY, limitsOf, overviewProps, spentOf } from './views.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -124,7 +126,7 @@ const ROW_COMPONENTS = [
   'InfoNotice',
 ] as const satisfies readonly SidebarRowComponent[]
 /** After the vault's and quota's tabs. */
-const TOOL = { id: TAB_ID, icon: '◈', short: 'crew', drawerColumns: OVERVIEW_COLUMNS + DRAWER_FRAME_COLUMNS, order: 2 }
+const TOOL = { id: TAB_ID, icon: '👥', short: 'crew', drawerColumns: OVERVIEW_COLUMNS + DRAWER_FRAME_COLUMNS, order: 2 }
 /** How often the open drawer redraws, for its clocks. */
 const TICK_MS = 1000
 
@@ -133,48 +135,28 @@ const claudeAgents = new ClaudeAgents()
 /** The brief shown in the pop-out, read from the run's report folder. */
 let brief: { run: string; title: string; text: string; path: string } | null = null
 let ticker: { cancel(): void } | null = null
+let record: SessionRecord = emptyRecord()
+let view: { tab: Tab; page: number } = { tab: 'running', page: 0 }
 
-function clock(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+const sessionRuns = () => [...runs.values()].filter(run => run.sessionId === sessionId)
+const currentLimits = () => limitsOf(settings.limits, record)
+const currentSpent = () => spentOf(sessionRuns(), claudeAgents.all())
+
+async function keep($: EngineInterface): Promise<void> {
+  record.agents = claudeAgents.all()
+  await saveRecord(ioOf($), recordPath(cacheDir, sessionId), record)
 }
 
-const tokensText = (t: Tokens | undefined) => (t === undefined ? null : `${shortCount(t.in)} in · ${shortCount(t.out)} out`)
-
-function pickText(r: ReviewerState): string {
-  const model = r.usedModel ?? r.model
-  return [model === 'default' ? undefined : model, r.effort].filter(x => x !== undefined).join(' · ')
-}
-
-/** This session's runs with a reviewer still running, and Claude's agents still going. */
-export function overviewProps(now: number): OverviewProps {
-  const live = [...runs.values()].filter(run => run.sessionId === sessionId && run.reviewers.some(r => r.status === 'running'))
-  return {
-    runs: live.map(run => ({
-      id: run.id,
-      description: run.description,
-      elapsed: clock(now - run.createdAt),
-      reviewers: run.reviewers.map(r => ({
-        key: r.key,
-        provider: r.provider,
-        pick: pickText(r),
-        status: r.status,
-        elapsed: clock((r.endedAt ?? now) - r.startedAt),
-        isRunning: r.status === 'running',
-        tokens: tokensText(r.tokens),
-      })),
-    })),
-    agents: claudeAgents
-      .all()
-      .filter(a => LIVE.includes(a.status))
-      .map(a => ({
-        id: a.id,
-        type: a.workflow === undefined ? a.type : 'workflow',
-        description: a.description,
-        status: a.status,
-        elapsed: clock(now - a.startedAt),
-        tokens: tokensText(a.tokens),
-      })),
+/** This session's runs from disk, so a reload or a resume still shows and counts them. */
+async function loadSessionRuns($: EngineInterface): Promise<void> {
+  const io = ioOf($)
+  const dir = `${cacheDir}/runs`
+  if (!(await io.exists(dir))) return
+  for (const entry of await io.list(dir)) {
+    const path = `${dir}/${entry.name}/run.json`
+    if (entry.kind !== 'dir' || runs.has(entry.name) || !(await io.exists(path))) continue
+    const kept = JSON.parse(await io.read(path)) as Pick<Run, 'sessionId'>
+    if (kept.sessionId === sessionId) await load(io, cacheDir, entry.name)
   }
 }
 
@@ -294,6 +276,8 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   const description = str(f, 'description')
   const brief = str(f, 'prompt')
   const specs = reviewersOf(f)
+  const refusal = reviewRefusal(currentLimits(), currentSpent(), specs.map(s => s.provider))
+  if (refusal !== undefined) throw new BadInput(refusal)
   const read = readOf(f)
   const changes = changesOf(f)
   const web = f.web === true
@@ -350,6 +334,8 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
   const r = run.reviewers.find(x => x.key === key)
   if (r === undefined) throw new BadInput(`run ${run.id} has no reviewer ${key}; it has ${run.reviewers.map(x => x.key).join(', ')}`)
   if (r.status === 'running') throw new BadInput(`${key} is still running`)
+  const refusal = followUpRefusal(currentLimits(), currentSpent(), r.provider)
+  if (refusal !== undefined) throw new BadInput(refusal)
   if (f.background === false) {
     await continueOne(io, run, r, settings, await ask(io, run, r, settings, system, message, signal), alert)
     return summary(run)
@@ -415,6 +401,9 @@ export const register: Register = (on, options) => {
       inputSchema: STATUS_SCHEMA,
     })
     sessionId = await $.session.id()
+    record = await loadRecord(ioOf($), recordPath(cacheDir, sessionId))
+    claudeAgents.restore(record.agents, await $.agent.list())
+    await loadSessionRuns($)
     await $.sidebar.register(TOOL)
     ticker?.cancel()
     ticker = $.clock.every(TICK_MS, () => void tick($))
@@ -422,9 +411,12 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
+    // crew's own reviewers show under their run and count against the review limits.
+    if (e.subagentType.startsWith('crew:')) return next(e)
+    const refusal = agentRefusal(currentLimits(), currentSpent())
+    if (refusal !== undefined) return { deny: `crew: ${refusal}` }
     const spawned = await next(e)
-    // crew's own reviewers show under their run.
-    if (spawned.deny === undefined && spawned.agentId !== undefined && !e.subagentType.startsWith('crew:')) {
+    if (spawned.deny === undefined && spawned.agentId !== undefined) {
       claudeAgents.started({
         id: spawned.agentId,
         type: e.subagentType,
@@ -432,12 +424,25 @@ export const register: Register = (on, options) => {
         ...(e.workflow === undefined ? {} : { workflow: e.workflow.runId }),
         startedAt: await $.clock.now(),
       })
+      await keep($)
     }
     return spawned
   })
 
   on('ui.message', { element: OVERVIEW_KEY }, async ($, e, next) => {
-    const data = e.data as { stop?: { run?: unknown; key?: unknown }; brief?: unknown }
+    const data = e.data as { tab?: unknown; page?: unknown; raise?: unknown; toggle?: unknown; stop?: { run?: unknown; key?: unknown }; brief?: unknown }
+    if (data.tab === 'running' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
+    if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
+    if (data.raise === 'reviewRuns' || data.raise === 'reviewTokens' || data.raise === 'agentTokens') {
+      const raise: Raise = data.raise
+      record.raises = { ...record.raises, [raise]: record.raises[raise] + RAISE_BY[raise] }
+      await keep($)
+    }
+    if (typeof data.toggle === 'string' && (GATES as readonly string[]).includes(data.toggle)) {
+      const gate = data.toggle as Gate
+      record.closed = record.closed.includes(gate) ? record.closed.filter(g => g !== gate) : [...record.closed, gate]
+      await keep($)
+    }
     if (typeof data.stop?.run === 'string') {
       const key = typeof data.stop.key === 'string' ? data.stop.key : undefined
       for (const r of runs.get(data.stop.run)?.reviewers ?? []) {
@@ -478,7 +483,17 @@ export const register: Register = (on, options) => {
     const { Client } = $.ui.resolve(e)
     let filled: unknown = tree
     if (isDrawer) {
-      const props = overviewProps(await $.clock.now())
+      const usd = view.tab === 'log' ? ((await $.session.usage()).cost?.usd ?? null) : null
+      const props = overviewProps({
+        ...view,
+        rows: room.drawer,
+        now: await $.clock.now(),
+        usd,
+        sessionRuns: sessionRuns(),
+        agents: claudeAgents.all(),
+        record,
+        limits: settings.limits,
+      })
       const height = Math.min(room.drawer, overviewLines(props).length)
       filled = fillSlot(filled, DRAWER_SLOT, () => Client({ key: OVERVIEW_KEY, module: './overview.ts', props, width: OVERVIEW_COLUMNS, height }))
     }
@@ -524,10 +539,15 @@ export const register: Register = (on, options) => {
     return { decision: 'allow', reason: 'crew: a fenced reviewer call' }
   })
 
-  on('turn.complete', ($, e, next) => {
-    if (e.agentId !== undefined) {
+  on('turn.complete', async ($, e, next) => {
+    const tokens = e.usage === undefined ? undefined : claudeTokens(e.usage)
+    if (e.agentId === undefined) {
+      record.turns += 1
+      if (tokens !== undefined) record.main = { in: record.main.in + tokens.in, cached: record.main.cached + tokens.cached, out: record.main.out + tokens.out }
+      await keep($)
+    } else {
       claude.settle(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage })
-      claudeAgents.finished(e.agentId, e.reason === 'answer', e.usage === undefined ? undefined : claudeTokens(e.usage))
+      if (claudeAgents.finished(e.agentId, e.reason === 'answer', tokens, await $.clock.now())) await keep($)
     }
     return next(e)
   })

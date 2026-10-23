@@ -73,6 +73,27 @@
       "default": 1800,
       "min": 60,
       "max": 7200
+    },
+    "limit_review_runs": {
+      "type": "number",
+      "title": "Reviews per session",
+      "description": "How many reviews one session may start; past it the review tool is refused until raised",
+      "default": 20,
+      "min": 0
+    },
+    "limit_review_tokens": {
+      "type": "number",
+      "title": "Review tokens per session",
+      "description": "Fresh tokens (input not read from a cache, plus output) one session's reviewers may spend",
+      "default": 10000000,
+      "min": 0
+    },
+    "limit_agent_tokens": {
+      "type": "number",
+      "title": "Claude agent tokens per session",
+      "description": "Fresh tokens one session's own subagents and workflow agents may spend; past it new ones are refused",
+      "default": 20000000,
+      "min": 0
     }
   }
 }
