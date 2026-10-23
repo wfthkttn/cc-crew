@@ -31,6 +31,6 @@ export type Io = {
   agents: () => Promise<AgentInfo[]>
   spawnAgent: (args: AgentSpawnArgs) => Promise<AgentSpawnResult>
   send: (args: SessionSendArgs) => Promise<SessionSendResult>
-  /** Posts to the person's crew thread on the messenger, with sound. */
+  /** Posts to this session's thread on the person's messenger, with sound. */
   notify: (text: string) => Promise<void>
 }

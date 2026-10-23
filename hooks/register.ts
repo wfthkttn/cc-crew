@@ -159,11 +159,7 @@ function ioOf($: EngineInterface): Io {
     agents: () => $.agent.list(),
     spawnAgent: args => $.agent.spawn(args),
     send: args => $.session.send(args),
-    notify: async text => {
-      await $.courier.thread({ key: 'crew', title: 'crew: reviewers' })
-      await $.courier.enable({ thread: 'crew' })
-      await $.courier.post({ thread: 'crew', text, group: 'attention' })
-    },
+    notify: text => $.conversation.tell({ text: `crew: ${text}`, group: 'attention' }),
   }
 }
 
@@ -180,9 +176,9 @@ async function finish($: EngineInterface, label: string, work: () => Promise<str
   try {
     text = await work()
   } catch (err) {
-    text = `crew ${label} failed: ${String(err)}`
+    text = `${label} failed: ${String(err)}`
   }
-  await $.prompt.submit({ text })
+  await $.conversation.deliver({ from: 'crew', text })
 }
 
 async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
@@ -228,7 +224,7 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   $.clock.after(0, () =>
     void finish($, `review ${id}`, async () => {
       await execute(io, run, settings, system, task, cacheDir, alert, begun)
-      return `crew review finished.\n${summary(run)}`
+      return `review finished.\n${summary(run)}`
     }),
   )
   const who = run.reviewers.map(r => r.key).join(', ')
@@ -251,7 +247,7 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
   $.clock.after(0, () =>
     void finish($, `follow-up ${run.id}/${key}`, async () => {
       await continueOne(io, run, r, settings, asked, alert)
-      return `crew follow-up to ${key} finished.\n${summary(run)}`
+      return `follow-up to ${key} finished.\n${summary(run)}`
     }),
   )
   return `Asked ${key} in run ${run.id}. Its answer arrives as a message.`
