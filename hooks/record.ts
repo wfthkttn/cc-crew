@@ -3,8 +3,8 @@ import type { Io } from './io.ts'
 import type { Gate } from './limits.ts'
 import type { Tokens } from './usage.ts'
 
-/** Added to the settings' limits for this session from the Limits tab: reviews, and tokens by model limit name. */
-export type Raises = { reviewRuns: number; models: Record<string, number> }
+/** Added to the settings' limits for this session from the Limits tab: tokens by model limit name. */
+export type Raises = { models: Record<string, number> }
 
 /** What crew keeps of one session beside its runs, so a reload or a resume keeps the log and the limits. */
 export type SessionRecord = {
@@ -23,7 +23,7 @@ export function emptyRecord(): SessionRecord {
     main: { in: 0, cached: 0, out: 0 },
     turns: 0,
     agents: [],
-    raises: { reviewRuns: 0, models: {} },
+    raises: { models: {} },
     closed: [],
     isLimitsOff: false,
   }
@@ -35,8 +35,8 @@ export const recordPath = (cacheDir: string, sessionId: string) => `${cacheDir}/
 export async function loadRecord(io: Io, path: string): Promise<SessionRecord> {
   if (!(await io.exists(path))) return emptyRecord()
   const kept = JSON.parse(await io.read(path)) as Partial<SessionRecord>
-  // A record kept before limits were per model has raises by kind; its review raise carries over, its token raises do not.
-  const raises: Raises = { reviewRuns: kept.raises?.reviewRuns ?? 0, models: kept.raises?.models ?? {} }
+  // A record kept before limits were per model has raises by kind, which no limit takes now.
+  const raises: Raises = { models: kept.raises?.models ?? {} }
   return { ...emptyRecord(), ...kept, raises }
 }
 

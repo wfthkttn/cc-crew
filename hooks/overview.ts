@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-import type { LimitRow, LimitsProps, LogProps, OverviewAction, OverviewProps, RunningProps, Tab } from './overview-props'
+import type { LimitRow, LimitsProps, LogProps, OverviewAction, OverviewProps, RunningProps, Tab, UsageProps } from './overview-props'
 
 export const OVERVIEW_COLUMNS = 64
 
@@ -66,9 +66,9 @@ function tabLines(props: OverviewProps): Line[] {
   const label = (tab: Tab): string => {
     if (tab === 'running') return ` Running${props.counts.running > 0 ? ' ' + props.counts.running : ''} `
     if (tab === 'log') return ` Log${props.counts.log > 0 ? ' ' + props.counts.log : ''} `
-    return ' Limits '
+    return tab === 'usage' ? ' Usage ' : ' Limits '
   }
-  const tabs: Tab[] = ['running', 'limits', 'log']
+  const tabs: Tab[] = ['running', 'usage', 'limits', 'log']
   const row: Line = tabs.flatMap((tab, i) => [
     ...(i > 0 ? [{ text: '│', color: MUTED }] : []),
     { text: label(tab), action: { tab }, ...(tab === props.tab ? { color: HEADING, bold: true } : { color: MUTED }) },
@@ -77,56 +77,50 @@ function tabLines(props: OverviewProps): Line[] {
 }
 
 function runningLines(props: RunningProps): Line[] {
-  const spent = [
-    ...table(
-      TOTAL_COLUMNS,
-      0,
-      props.totals.map(t => ({ cells: [t.label, t.count, t.new, t.cached, t.out], isPart: t.isPart })),
-    ),
-    [{ text: '' }],
-  ]
-  if (props.runs.length === 0 && props.agents.length === 0) return [...spent, muted('Nothing runs now.')]
-  const lines: Line[] = [...spent]
-  if (props.runs.length > 0) lines.push(heading('Crew reviews'))
-  for (const run of props.runs) {
+  if (props.live.length === 0) return [muted('Nothing runs now.')]
+  const lines: Line[] = []
+  for (const item of props.live) {
+    if (item.kind === 'agent') {
+      const open = { open: { agent: item.id } }
+      lines.push([
+        { text: ' ' + fit(`${item.type}: ${item.description}`, LIVE_WHAT_COLUMNS) + ' ', color: TEXT, bold: true, action: open },
+        { text: right(item.elapsed, 5) + ' ', color: MUTED, action: open },
+        { text: fit(item.status, 9), color: item.status === 'running' ? RUNNING : TEXT, action: open },
+        { text: item.tokens ?? '', color: MUTED, action: open },
+      ])
+      continue
+    }
     const description = OVERVIEW_COLUMNS - 1 - 1 - 5 - 1 - OPEN_COLUMNS - 1 - STOP_COLUMNS
     lines.push([
-      { text: ' ' + fit(run.description, description) + ' ', color: TEXT, bold: true },
-      { text: right(run.elapsed, 5) + ' ', color: MUTED },
-      ...pill(OPEN_LABEL, { open: { run: run.id } }),
+      { text: ' ' + fit(`review: ${item.description}`, description) + ' ', color: TEXT, bold: true },
+      { text: right(item.elapsed, 5) + ' ', color: MUTED },
+      ...pill(OPEN_LABEL, { open: { run: item.id } }),
       { text: ' ' },
-      ...pill(STOP_LABEL, { stop: { run: run.id } }, true),
+      ...pill(STOP_LABEL, { stop: { run: item.id } }, true),
     ])
-    for (const r of run.reviewers) {
+    for (const r of item.reviewers) {
       const head: Line = [
         { text: '   ' + fit(r.provider, 12), color: TEXT },
         { text: fit(r.pick, 15) + ' ', color: MUTED },
         { text: fit(r.status, 9), color: r.isRunning ? RUNNING : TEXT },
         { text: right(r.elapsed, 5) + ' ', color: MUTED },
       ]
-      const tail: Line = r.isRunning ? pill(STOP_LABEL, { stop: { run: run.id, key: r.key } }, true) : [{ text: r.tokens ?? '', color: MUTED }]
+      const tail: Line = r.isRunning ? pill(STOP_LABEL, { stop: { run: item.id, key: r.key } }, true) : [{ text: r.tokens ?? '', color: MUTED }]
       lines.push([...head, ...tail])
     }
-  }
-  if (props.agents.length > 0) lines.push(heading('Claude agents'))
-  for (const a of props.agents) {
-    lines.push([
-      { text: '   ' + fit(a.type, 12), color: TEXT, action: { open: { agent: a.id } } },
-      { text: fit(a.description, 15) + ' ', color: MUTED, action: { open: { agent: a.id } } },
-      { text: fit(a.status, 9), color: a.status === 'running' ? RUNNING : TEXT, action: { open: { agent: a.id } } },
-      { text: right(a.elapsed, 5) + ' ', color: MUTED, action: { open: { agent: a.id } } },
-      { text: a.tokens ?? '', color: MUTED, action: { open: { agent: a.id } } },
-    ])
   }
   return lines
 }
 
+/** An agent's line: what it is, then its clock, status and tokens. */
+const LIVE_WHAT_COLUMNS = 30
+
 type Column = { title: string; width: number; isNumber?: boolean }
-/** A table row: `isPart` dims it and indents its named column; `action` makes the whole row a press; `isOpened` marks it. */
-type TableRow = { cells: string[]; isPart: boolean; action?: OverviewAction; isOpened?: boolean }
+/** A table row: `action` makes the whole row a press; `isOpened` marks it. */
+type TableRow = { cells: string[]; action?: OverviewAction; isOpened?: boolean }
 
 /** Columns a space apart, numbers to the right, under a header and a rule. */
-function table(columns: readonly Column[], named: number, rows: readonly TableRow[]): Line[] {
+function table(columns: readonly Column[], rows: readonly TableRow[]): Line[] {
   const cell = (text: string, c: Column) => (c.isNumber === true ? right(fit(text, c.width).trimEnd(), c.width) : fit(text, c.width))
   const used = columns.reduce((n, c) => n + c.width, 0) + columns.length - 1
   return [
@@ -135,8 +129,8 @@ function table(columns: readonly Column[], named: number, rows: readonly TableRo
     ...rows.map(
       (row): Line => [
         {
-          text: columns.map((c, i) => cell(i === named && row.isPart ? `  ${row.cells[i] ?? ''}` : (row.cells[i] ?? ''), c)).join(' '),
-          color: row.isOpened === true ? HEADING : row.isPart ? MUTED : TEXT,
+          text: columns.map((c, i) => cell(row.cells[i] ?? '', c)).join(' '),
+          color: row.isOpened === true ? HEADING : TEXT,
           ...(row.isOpened === true ? { bold: true } : {}),
           ...(row.action === undefined ? {} : { action: row.action }),
         },
@@ -145,13 +139,24 @@ function table(columns: readonly Column[], named: number, rows: readonly TableRo
   ]
 }
 
-const TOTAL_COLUMNS: readonly Column[] = [
-  { title: '', width: 10 },
-  { title: 'count', width: 9, isNumber: true },
+/** A model's limit name, `agy gemini-3.8-flash`, leads each row. */
+const USAGE_COLUMNS: readonly Column[] = [
+  { title: '', width: 20 },
+  { title: 'runs', width: 9, isNumber: true },
   { title: 'new', width: 6, isNumber: true },
   { title: 'cached', width: 7, isNumber: true },
   { title: 'out', width: 6, isNumber: true },
+  { title: 'weighted', width: 8, isNumber: true },
 ]
+
+/** Claude's own chat, then each model; a model's row opens its reviewers and agents. */
+function usageLines(props: UsageProps, opened: OverviewProps['opened']): Line[] {
+  const rows = props.rows.map(r => ({
+    cells: [r.label, r.count, r.new, r.cached, r.out, r.weighted],
+    ...(r.model === null ? {} : { action: { open: { model: r.model } }, isOpened: isSame(opened, { model: r.model }) }),
+  }))
+  return [...table(USAGE_COLUMNS, rows), [{ text: '' }], muted('Press a model for its reviewers and agents.')]
+}
 
 /** time, what, status, took, new, out: the what column takes what the others leave. */
 const LOG_COLUMNS: readonly Column[] = [
@@ -182,8 +187,7 @@ function logLines(props: LogProps, rows: number, opened: OverviewProps['opened']
   const shown = props.rows.slice(page * size, page * size + size)
   const lines = table(
     LOG_COLUMNS,
-    1,
-    shown.map(r => ({ cells: [r.time, r.what, r.status, r.took, r.new, r.out], isPart: false, action: { open: r.open }, isOpened: isSame(opened, r.open) })),
+    shown.map(r => ({ cells: [r.time, r.what, r.status, r.took, r.new, r.out], action: { open: r.open }, isOpened: isSame(opened, r.open) })),
   )
   if (pages === 1) return lines
   const nav: Line = [
@@ -197,7 +201,7 @@ function logLines(props: LogProps, rows: number, opened: OverviewProps['opened']
 
 /** Room for a limit name such as `agy gemini-3.8-flash`. */
 const LIMIT_LABEL_COLUMNS = 24
-/** The limit beside what was spent: `10M`, `20 runs`. */
+/** The limit beside what was spent: `10M`. */
 const LIMIT_COLUMNS = 10
 
 function limitsLines(props: LimitsProps): Line[] {
@@ -206,8 +210,8 @@ function limitsLines(props: LimitsProps): Line[] {
     ...pill(props.isOn ? '● on' : '○ off', { switchLimits: true }, !props.isOn),
     { text: props.isOn ? '' : '  nothing below is enforced', color: MUTED },
   ]
-  const row = (r: LimitRow, labelColor: string): Line => [
-    { text: fit(r.label, LIMIT_LABEL_COLUMNS), color: r.isOver ? OVER : labelColor },
+  const row = (r: LimitRow): Line => [
+    { text: fit(r.label, LIMIT_LABEL_COLUMNS), color: r.isOver ? OVER : TEXT },
     { text: right(r.spent, 6) + ' / ', color: r.isOver ? OVER : MUTED },
     { text: fit(r.limit, LIMIT_COLUMNS), color: MUTED },
     ...pill(r.raiseLabel, { raise: r.raise }),
@@ -215,15 +219,13 @@ function limitsLines(props: LimitsProps): Line[] {
   const models: Line[] =
     props.models.length === 0
       ? [muted(`Nothing ran on a model yet; each may spend ${props.modelDefault}.`)]
-      : props.models.map(r => row(r, TEXT))
+      : props.models.map(row)
   const gates: Line = [
     { text: fit('Allowed', 15), color: TEXT, bold: true },
     ...props.gates.flatMap(g => [...pill(`${g.isOpen ? '●' : '○'} ${g.gate}`, { toggle: g.gate }, !g.isOpen), { text: ' ' }]),
   ]
   return [
     on,
-    [{ text: '' }],
-    row(props.reviews, TEXT),
     [{ text: '' }],
     heading('Weighted tokens by model'),
     ...models,
@@ -240,7 +242,13 @@ function limitsLines(props: LimitsProps): Line[] {
 
 export function overviewLines(props: OverviewProps): Line[] {
   const body =
-    props.tab === 'running' ? runningLines(props.running) : props.tab === 'log' ? logLines(props.log, props.rows, props.opened) : limitsLines(props.limits)
+    props.tab === 'running'
+      ? runningLines(props.running)
+      : props.tab === 'usage'
+        ? usageLines(props.usage, props.opened)
+        : props.tab === 'log'
+          ? logLines(props.log, props.rows, props.opened)
+          : limitsLines(props.limits)
   return [...tabLines(props), ...body].map(full)
 }
 

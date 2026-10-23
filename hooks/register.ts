@@ -31,7 +31,7 @@ import {
 import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens } from './usage.ts'
-import { type Badge, RAISE_BY, agentDetail, badgeOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf } from './views.ts'
+import { type Badge, RAISE_BY, agentDetail, badgeOf, limitsOf, limitsProps, modelDetail, overviewProps, runDetail, spentOf } from './views.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -132,8 +132,8 @@ const TICK_MS = 1000
 
 let sessionId = ''
 const claudeAgents = new ClaudeAgents()
-/** The run or agent the pop-out shows, with its brief or prompt as read from `path` when it was opened. */
-let detail: { target: Target; text: string; path: string } | null = null
+/** What the pop-out shows: a run or agent with its brief or prompt as read from `path` when it was opened; a model, worked out on each draw. */
+let detail: { target: Target; text: string; path: string | null } | null = null
 let ticker: { cancel(): void } | null = null
 let record: SessionRecord = emptyRecord()
 let view: { tab: Tab; page: number } = { tab: 'running', page: 0 }
@@ -162,17 +162,20 @@ async function loadSessionRuns($: EngineInterface): Promise<void> {
 
 const promptPath = (agentId: string) => `${cacheDir}/sessions/${sessionId}/prompts/${agentId}.md`
 
-/** Text as the pop-out's room allows, the last line saying where the rest is when it does not fit. */
-export function detailProps(title: string, text: string, path: string, rows: number): DetailProps {
+/** Text as the pop-out's room allows, the last line saying how much is left out and, for a file, where the rest is. */
+export function detailProps(title: string, text: string, path: string | null, rows: number): DetailProps {
   const lines = wrap(text, OVERVIEW_COLUMNS)
   const room = Math.max(1, rows - 1)
   if (lines.length <= room) return { title, lines }
   const kept = lines.slice(0, room - 1)
-  return { title, lines: [...kept, `… ${lines.length - kept.length} more lines in ${path}`] }
+  return { title, lines: [...kept, `… ${lines.length - kept.length} more lines${path === null ? '' : ` in ${path}`}`] }
 }
 
-/** The pop-out's title and text for what it shows, from the run's or agent's state now; null once it is gone. */
+/** The pop-out's title and text for what it shows, from the run's, agent's or model's state now; null once it is gone. */
 function shownDetail(shown: NonNullable<typeof detail>, now: number): { title: string; text: string } | null {
+  if ('model' in shown.target) {
+    return { title: shown.target.model, text: modelDetail(shown.target.model, sessionRuns(), claudeAgents.all(), currentLimits(), now) }
+  }
   if ('run' in shown.target) {
     const run = runs.get(shown.target.run)
     return run === undefined ? null : { title: `review: ${run.description}`, text: runDetail(run, shown.text) }
@@ -187,6 +190,11 @@ async function open($: EngineInterface, target: Target): Promise<void> {
   if (detail !== null && JSON.stringify(detail.target) === JSON.stringify(target)) {
     detail = null
     await $.sidebar.popout({ id: TAB_ID, isShown: false })
+    return
+  }
+  if ('model' in target) {
+    detail = { target, text: '', path: null }
+    await $.sidebar.popout({ id: TAB_ID, isShown: true })
     return
   }
   let path: string
@@ -508,21 +516,17 @@ export const register: Register = (on, options) => {
       toggle?: unknown
       switchLimits?: unknown
       stop?: { run?: unknown; key?: unknown }
-      open?: { run?: unknown; agent?: unknown }
+      open?: { run?: unknown; agent?: unknown; model?: unknown }
     }
     if (data.switchLimits === true) {
       record.isLimitsOff = !record.isLimitsOff
       await keep($)
     }
-    if (data.tab === 'running' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
+    if (data.tab === 'running' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
-    if (data.raise === 'reviewRuns') {
-      record.raises = { ...record.raises, reviewRuns: record.raises.reviewRuns + RAISE_BY.reviewRuns }
-      await keep($)
-    }
     const raised = (data.raise as { model?: unknown } | undefined)?.model
     if (typeof raised === 'string') {
-      record.raises = { ...record.raises, models: { ...record.raises.models, [raised]: (record.raises.models[raised] ?? 0) + RAISE_BY.model } }
+      record.raises = { models: { ...record.raises.models, [raised]: (record.raises.models[raised] ?? 0) + RAISE_BY } }
       await keep($)
     }
     if (typeof data.toggle === 'string' && (GATES as readonly string[]).includes(data.toggle)) {
@@ -538,6 +542,7 @@ export const register: Register = (on, options) => {
     }
     if (typeof data.open?.run === 'string') await open($, { run: data.open.run })
     if (typeof data.open?.agent === 'string') await open($, { agent: data.open.agent })
+    if (typeof data.open?.model === 'string') await open($, { model: data.open.model })
     $.ui.invalidate('ui.render')
     return next(e)
   })

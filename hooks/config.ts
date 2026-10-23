@@ -14,7 +14,7 @@ export type Settings = {
   reviewerRules: string[]
   timeoutMs: number
   /** Each session's limits before the Limits tab raises them; `models` by limit name, others get `modelDefault`. */
-  limits: { reviewRuns: number; modelDefault: number; models: Record<string, number> }
+  limits: { modelDefault: number; models: Record<string, number> }
 }
 
 export function isProvider(name: string): name is Provider {
@@ -70,7 +70,6 @@ export function settingsFrom(options: PluginOptions): Settings {
     reviewerRules: [...(options.reviewer_rules as readonly string[])],
     timeoutMs: (options.timeout_s as number) * 1000,
     limits: {
-      reviewRuns: options.limit_review_runs as number,
       modelDefault: options.limit_model_tokens as number,
       models: Object.fromEntries((options.model_limits as readonly string[]).map(modelLimitOf)),
     },

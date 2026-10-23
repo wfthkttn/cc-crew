@@ -74,13 +74,6 @@
       "min": 60,
       "max": 7200
     },
-    "limit_review_runs": {
-      "type": "number",
-      "title": "Reviews per session",
-      "description": "How many reviews one session may start; past it the review tool is refused until raised",
-      "default": 20,
-      "min": 0
-    },
     "limit_model_tokens": {
       "type": "number",
       "title": "Weighted tokens per model per session",
@@ -92,8 +85,8 @@
       "type": "string",
       "multiple": true,
       "title": "Per-model token limits",
-      "description": "Models with a weighted-token limit of their own, named as the crew tab names them: \"claude opus=10M\", \"codex default=40M\", \"agy gemini-3.8-flash=60M\"",
-      "default": []
+      "description": "Models with a weighted-token limit of their own, named as the crew tab names them; Antigravity's default model is Argon, so both its names carry its limit",
+      "default": ["agy gemini-4-argon=1M", "agy default=1M", "codex default=2M", "claude opus=3M"]
     }
   }
 }

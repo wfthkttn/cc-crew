@@ -56,7 +56,6 @@ export const GATES: readonly Gate[] = ['codex', 'antigravity', 'claude', 'agents
 /** A session's limits: the settings with this session's raises on top; `isOn` false leaves only the gates. */
 export type Limits = {
   isOn: boolean
-  reviewRuns: number
   /** Tokens by model; a model not named here has `modelDefault`. */
   models: Readonly<Record<string, number>>
   modelDefault: number
@@ -65,13 +64,13 @@ export type Limits = {
 
 export const modelLimit = (limits: Limits, model: string): number => limits.models[model] ?? limits.modelDefault
 
-/** What the session has spent: reviews started, and tokens by model, reviewers and Claude's agents together. */
-export type Spent = { reviewRuns: number; models: Readonly<Record<string, number>> }
+/** Tokens by model the session spent, reviewers and Claude's agents together. */
+export type Spent = Readonly<Record<string, number>>
 
 const RAISE_WHERE = 'raise it in the crew tab (Limits) for this session, or in /config for every session'
 
 function overModel(limits: Limits, spent: Spent, model: string): string | undefined {
-  const used = spent.models[model] ?? 0
+  const used = spent[model] ?? 0
   const limit = modelLimit(limits, model)
   if (used < limit) return undefined
   return `${model} spent ${used} weighted tokens in this session, its limit is ${limit}: ${RAISE_WHERE}`
@@ -82,7 +81,6 @@ export function reviewRefusal(limits: Limits, spent: Spent, providers: readonly 
   const closed = providers.filter(p => limits.closed.includes(p))
   if (closed.length > 0) return `${closed.join(', ')} reviewers are switched off for this session in the crew tab (Limits)`
   if (!limits.isOn) return undefined
-  if (spent.reviewRuns >= limits.reviewRuns) return `this session ran ${spent.reviewRuns} reviews, its limit is ${limits.reviewRuns}: ${RAISE_WHERE}`
   return models.map(m => overModel(limits, spent, m)).find(r => r !== undefined)
 }
 

@@ -1,12 +1,12 @@
 import type { Gate } from './limits'
 
-export type Tab = 'running' | 'limits' | 'log'
+export type Tab = 'running' | 'usage' | 'limits' | 'log'
 
-/** What a raise press adds to: the reviews a session may start, or one model's tokens by its limit name. */
-export type Raise = 'reviewRuns' | { model: string }
+/** What a raise press adds to: one model's tokens, by its limit name. */
+export type Raise = { model: string }
 
-/** A run or an agent whose details the pop-out shows. */
-export type Target = { run: string } | { agent: string }
+/** A run, an agent or a model (by its limit name) whose details the pop-out shows. */
+export type Target = { run: string } | { agent: string } | { model: string }
 
 /** What a press on the overview asks for. */
 export type OverviewAction =
@@ -30,22 +30,20 @@ export type ReviewerRow = {
   tokens: string | null
 }
 
-export type RunRow = { id: string; description: string; elapsed: string; reviewers: ReviewerRow[] }
+export type RunRow = { kind: 'review'; id: string; description: string; elapsed: string; reviewers: ReviewerRow[] }
 
-export type AgentRow = { id: string; type: string; description: string; status: string; elapsed: string; tokens: string | null }
+export type AgentRow = { kind: 'agent'; id: string; type: string; description: string; status: string; elapsed: string; tokens: string | null }
 
 /** Token counts as a table's columns show them, `109k`; empty where nothing was reported. */
 export type TokenCells = { new: string; cached: string; out: string }
 
-/** A row of the session's totals; `isPart` rows break the one above down. */
-export type TotalRow = TokenCells & { label: string; count: string; isPart: boolean }
+/** The first tab: the reviews and agents running now, newest first. */
+export type RunningProps = { live: (RunRow | AgentRow)[] }
 
-/** The first tab: what the session spent, then what runs now. */
-export type RunningProps = {
-  totals: TotalRow[]
-  runs: RunRow[]
-  agents: AgentRow[]
-}
+/** A row of the session's usage: Claude's own chat, then each model its reviewers and agents ran on; a model's row opens its details. */
+export type UsageRow = TokenCells & { label: string; count: string; weighted: string; model: string | null }
+
+export type UsageProps = { rows: UsageRow[] }
 
 /** One finished run or agent, newest first; a press opens its details. */
 export type LogRow = TokenCells & { time: string; what: string; status: string; took: string; open: Target }
@@ -59,7 +57,7 @@ export type LimitRow = { label: string; spent: string; limit: string; raise: Rai
  * `isOn` false: the limits below are shown but not enforced; the gates still are. `models` are the ones that spent or have
  * a limit of their own; any other has `modelDefault`.
  */
-export type LimitsProps = { isOn: boolean; reviews: LimitRow; models: LimitRow[]; modelDefault: string; gates: { gate: Gate; isOpen: boolean }[] }
+export type LimitsProps = { isOn: boolean; models: LimitRow[]; modelDefault: string; gates: { gate: Gate; isOpen: boolean }[] }
 
 export type OverviewProps = {
   tab: Tab
@@ -70,6 +68,7 @@ export type OverviewProps = {
   /** The run or agent the pop-out shows, so its line reads as open. */
   opened: Target | null
   running: RunningProps
+  usage: UsageProps
   log: LogProps
   limits: LimitsProps
 }

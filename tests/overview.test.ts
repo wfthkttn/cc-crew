@@ -8,7 +8,7 @@ import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { emptyRecord } from '../hooks/record.ts'
 import type { Run } from '../hooks/runs.ts'
 import { shortCount, tokensOf } from '../hooks/usage.ts'
-import { agentDetail, badgeOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf } from '../hooks/views.ts'
+import { agentDetail, badgeOf, limitsOf, limitsProps, modelDetail, overviewProps, runDetail, spentOf } from '../hooks/views.ts'
 
 // Trimmed from live reports, 2026-10-23.
 test("each provider's usage reads as tokens in (cache included) and out", () => {
@@ -83,37 +83,48 @@ function props(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = 
     sessionRuns: [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])],
     agents: AGENTS,
     record: { ...emptyRecord(), turns: 7, main: { in: 1_200_000, cached: 1_000_000, out: 30_000 } },
-    limits: { reviewRuns: 20, modelDefault: 10_000_000, models: {} },
+    limits: { modelDefault: 10_000_000, models: {} },
   })
 }
 
 const text = (p: OverviewProps) => overviewLines(p).map(line => line.map(s => s.text).join(''))
 
 test('every view fits the drawer, under a tab row that counts what runs and what is logged, Log last', () => {
-  for (const tab of ['running', 'log', 'limits'] as const) {
+  for (const tab of ['running', 'usage', 'log', 'limits'] as const) {
     const lines = text(props(tab))
     expect(lines.map(l => [...l].length)).toEqual(lines.map(() => OVERVIEW_COLUMNS))
-    expect(lines[0]).toStartWith(' Running 2 │ Limits │ Log 2 ')
+    expect(lines[0]).toStartWith(' Running 2 │ Usage │ Limits │ Log 2 ')
   }
 })
 
-test("Running: the session's spend as a table, then the live run with its buttons, then the live Claude agent", () => {
+test('Running: reviews and agents running now in one list, newest first, a review with its buttons and reviewers', () => {
   const p = props('running')
   const lines = text(p)
-  expect(lines[2]).toMatch(/count +new +cached +out/)
-  expect(lines[4]).toMatch(/^Claude +7 turns +200k +1\.0M +30k/)
-  expect(lines[5]).toMatch(/^Reviews +2 runs +900 +2k +120/)
-  expect(lines[6]).toMatch(/^ {2}codex +300 +600 +40/)
-  expect(lines[8]).toMatch(/^Agents +2 +10k +40k +2k/)
-  expect(lines[10]).toStartWith('Crew reviews')
-  expect(lines[11]).toContain('review r1')
-  expect(lines[11]).toContain('▐⧉ Details▌ ▐■ Stop▌')
-  expect(lines[12]).toContain('▐■ Stop▌')
-  expect(lines[13]).toContain('300 new · 40 out')
-  expect(lines[14]).toStartWith('Claude agents')
-  expect(lines[15]).toContain('find the parser')
-  expect(actionAt(p, lines[11]!.indexOf('Details'), 11)).toEqual({ open: { run: 'r1' } })
-  expect(actionAt(p, 5, 15)).toEqual({ open: { agent: 'a1' } })
+  expect(lines[2]).toMatch(/^ Explore: find the parser +3:12 running/)
+  expect(lines[3]).toContain('review: review r1')
+  expect(lines[3]).toContain('▐⧉ Details▌ ▐■ Stop▌')
+  expect(lines[4]).toContain('▐■ Stop▌')
+  expect(lines[5]).toContain('300 new · 40 out')
+  expect(lines).toHaveLength(6)
+  expect(actionAt(p, 5, 2)).toEqual({ open: { agent: 'a1' } })
+  expect(actionAt(p, lines[3]!.indexOf('Details'), 3)).toEqual({ open: { run: 'r1' } })
+})
+
+test("Usage: this chat, then each model with its reviewers' and agents' runs and tokens; a model's row opens its details", () => {
+  const p = props('usage')
+  const lines = text(p)
+  expect(lines[2]).toMatch(/runs +new +cached +out +weighted/)
+  expect(lines[4]).toMatch(/^this chat +7 turns +200k +1\.0M +30k +450k/)
+  expect(lines[5]).toMatch(/^claude opus +3 +11k +41k +2k +25k/)
+  expect(lines[6]).toMatch(/^claude sonnet +1 +0 +0 +0 +0/)
+  expect(lines[7]).toMatch(/^codex default +2 +300 +600 +40 +560/)
+  expect(actionAt(p, 0, 4)).toBe(null)
+  expect(actionAt(p, 0, 5)).toEqual({ open: { model: 'claude opus' } })
+  expect(overviewLines(props('usage', 40, 0, { model: 'claude opus' }))[5]![0]!.bold).toBe(true)
+  const detail = modelDetail('claude opus', [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])], AGENTS, limitsOf({ modelDefault: 10_000_000, models: {} }, emptyRecord()), AT + 252_000)
+  expect(detail).toStartWith('3 runs · 25k of 10M weighted tokens\nTokens: 11k new · 41k cached · 2k out\n')
+  expect(detail).toContain('20:07 workflow: review:bugs\n└ completed, 1:00 · 10k new · 40k cached · 2k out · 24k weighted')
+  expect(detail).toContain('20:07 review: review r0 (claude-opus)\n└ stopped, 1:18')
 })
 
 test('Log: one row per finished run or agent, newest first; a press on a row opens it', () => {
@@ -142,21 +153,20 @@ test('Log pages when it runs past the drawer, its header on every page', () => {
   expect(last.at(-1)).toContain('page 2 of 2')
 })
 
-test('Limits: an on switch, reviews against their limit, each model that ran against its own, and a switch per gate', () => {
+test('Limits: an on switch, each model that ran against its own limit, and a switch per gate', () => {
   const p = props('limits')
   const lines = text(p)
   expect(lines[2]).toContain('▐● on▌')
   expect(actionAt(p, lines[2]!.indexOf('on'), 2)).toEqual({ switchLimits: true })
-  expect(lines[4]).toMatch(/^Reviews +2 \/ 20 runs +▐\+10 runs▌/)
-  expect(lines[6]).toStartWith('Weighted tokens by model')
-  expect(lines[7]).toMatch(/^claude opus +25k \/ 10M +▐\+20M▌/)
-  expect(lines[8]).toMatch(/^claude sonnet +0 \/ 10M/)
-  expect(lines[9]).toMatch(/^codex default +560 \/ 10M/)
-  expect(lines[11]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● agents▌')
-  expect(actionAt(p, lines[4]!.indexOf('+10'), 4)).toEqual({ raise: 'reviewRuns' })
-  expect(actionAt(p, lines[7]!.indexOf('+20M'), 7)).toEqual({ raise: { model: 'claude opus' } })
-  expect(actionAt(p, lines[11]!.indexOf('agents'), 11)).toEqual({ toggle: 'agents' })
+  expect(lines[4]).toStartWith('Weighted tokens by model')
+  expect(lines[5]).toMatch(/^claude opus +25k \/ 10M +▐\+20M▌/)
+  expect(lines[6]).toMatch(/^claude sonnet +0 \/ 10M/)
+  expect(lines[7]).toMatch(/^codex default +560 \/ 10M/)
+  expect(lines[9]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● agents▌')
+  expect(actionAt(p, lines[5]!.indexOf('+20M'), 5)).toEqual({ raise: { model: 'claude opus' } })
+  expect(actionAt(p, lines[9]!.indexOf('agents'), 9)).toEqual({ toggle: 'agents' })
   expect(actionAt(p, 1, 0)).toEqual({ tab: 'running' })
+  expect(actionAt(p, lines[0]!.indexOf('Usage'), 0)).toEqual({ tab: 'usage' })
   expect(actionAt(p, lines[0]!.indexOf('Log'), 0)).toEqual({ tab: 'log' })
 })
 
@@ -186,21 +196,19 @@ test("a run's and an agent's details: when, how it went, what it spent, then the
 test('work on a model is refused once the model is past its limit, reviewers and agents counted together; raises and the switch lift it', () => {
   const runs = [run('r1', ['ok', 'ok']), run('r2', ['ok', 'ok'])]
   const spent = spentOf(runs, AGENTS)
-  expect(spent).toEqual({ reviewRuns: 2, models: { 'codex default': 2 * 560, 'claude opus': 2 * 560 + 24_000, 'claude sonnet': 0 } })
-  const base = { reviewRuns: 2, modelDefault: 10_000_000, models: { 'claude opus': 10_000 } }
+  expect(spent).toEqual({ 'codex default': 2 * 560, 'claude opus': 2 * 560 + 24_000, 'claude sonnet': 0 })
+  const base = { modelDefault: 10_000_000, models: { 'claude opus': 10_000 } }
   const none = emptyRecord()
-  expect(reviewRefusal(limitsOf(base, none), spent, ['codex'], ['codex default'])).toContain('this session ran 2 reviews, its limit is 2')
-  const moreRuns = { ...none, raises: { reviewRuns: 10, models: {} } }
-  expect(reviewRefusal(limitsOf(base, moreRuns), spent, ['codex'], ['codex default'])).toBe(undefined)
-  expect(reviewRefusal(limitsOf(base, moreRuns), spent, ['codex', 'claude'], ['codex default', 'claude opus'])).toContain(
+  expect(reviewRefusal(limitsOf(base, none), spent, ['codex'], ['codex default'])).toBe(undefined)
+  expect(reviewRefusal(limitsOf(base, none), spent, ['codex', 'claude'], ['codex default', 'claude opus'])).toContain(
     'claude opus spent 25120 weighted tokens in this session, its limit is 10000',
   )
-  expect(reviewRefusal(limitsOf(base, { ...moreRuns, closed: ['antigravity'] }), spent, ['codex', 'antigravity'], [])).toContain('antigravity reviewers are switched off')
+  expect(reviewRefusal(limitsOf(base, { ...none, closed: ['antigravity'] }), spent, ['codex', 'antigravity'], [])).toContain('antigravity reviewers are switched off')
   expect(followUpRefusal(limitsOf(base, none), spent, 'codex', 'codex default')).toBe(undefined)
   expect(followUpRefusal(limitsOf(base, none), spent, 'claude', 'claude opus')).toContain('claude opus spent 25120')
   expect(agentRefusal(limitsOf(base, none), spent, 'claude opus')).toContain('claude opus spent 25120')
   expect(agentRefusal(limitsOf(base, none), spent, 'claude sonnet')).toBe(undefined)
-  const moreOpus = { ...none, raises: { reviewRuns: 0, models: { 'claude opus': 10_000_000 } } }
+  const moreOpus = { ...none, raises: { models: { 'claude opus': 10_000_000 } } }
   expect(agentRefusal(limitsOf(base, moreOpus), spent, 'claude opus')).toBe(undefined)
   expect(agentRefusal(limitsOf(base, { ...none, isLimitsOff: true }), spent, 'claude opus')).toBe(undefined)
   expect(agentRefusal(limitsOf(base, { ...none, closed: ['agents'] }), spent, 'claude sonnet')).toContain('switched off')
@@ -209,10 +217,10 @@ test('work on a model is refused once the model is past its limit, reviewers and
 test('the tab badge counts reviewers and agents running plus limits reached, amber once one is', () => {
   const runs = [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])]
   const spent = spentOf(runs, AGENTS)
-  const roomy = limitsProps(limitsOf({ reviewRuns: 20, modelDefault: 10_000_000, models: {} }, emptyRecord()), spent)
+  const roomy = limitsProps(limitsOf({ modelDefault: 10_000_000, models: {} }, emptyRecord()), spent)
   expect(badgeOf(runs, AGENTS, roomy)).toEqual({ count: 2, level: 'info' })
-  const full = { reviewRuns: 2, modelDefault: 10_000_000, models: { 'codex default': 100 } }
-  expect(badgeOf(runs, AGENTS, limitsProps(limitsOf(full, emptyRecord()), spent))).toEqual({ count: 4, level: 'attention' })
+  const full = { modelDefault: 10_000_000, models: { 'codex default': 100 } }
+  expect(badgeOf(runs, AGENTS, limitsProps(limitsOf(full, emptyRecord()), spent))).toEqual({ count: 3, level: 'attention' })
   expect(badgeOf(runs, AGENTS, limitsProps(limitsOf(full, { ...emptyRecord(), isLimitsOff: true }), spent))).toEqual({ count: 2, level: 'info' })
   expect(badgeOf([], [], roomy)).toEqual({ count: 0, level: 'info' })
 })
