@@ -245,7 +245,7 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
     io.notified.push(`${provider}: ${detail}`)
     return undefined
   }
-  await execute(io, r, settings, 'SYS', 'TASK', '/c', alert)
+  await execute(io, r, settings, 'SYS', 'TASK', '/c', alert, new Map())
   expect(r.reviewers.map(x => x.status)).toEqual(['signed_out', 'failed'])
   expect(io.notified[0]).toStartWith('codex: Codex is signed out')
   expect(io.files.has(`${r.reportDir}/codex-default.md`)).toBe(true)

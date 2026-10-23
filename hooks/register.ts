@@ -6,7 +6,7 @@ import { type Provider, type Settings, isProvider, settingsFrom } from './config
 import type { Io } from './io.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
-import { type Alert, type ReviewerSpec, type Run, continueOne, execute, keysFor, load, runs, slugOf, summary } from './runs.ts'
+import { type Alert, type ReviewerSpec, type Run, ask, beginClaude, continueOne, execute, keysFor, load, runs, slugOf, summary } from './runs.ts'
 import { type ReadSpec, findSecrets, isInside, resolveRoots } from './scope.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
@@ -215,13 +215,14 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   }
   const task = taskText({ brief, roots, web, ...(change !== undefined ? { changes: change } : {}) })
   await $.fs.write(`${run.reportDir}/brief.md`, task)
+  const begun = await beginClaude(io, run, settings, system, task)
   if (!background) {
-    await execute(io, run, settings, system, task, cacheDir, alert, signal)
+    await execute(io, run, settings, system, task, cacheDir, alert, begun, signal)
     return summary(run)
   }
   $.clock.after(0, () =>
     void finish($, `review ${id}`, async () => {
-      await execute(io, run, settings, system, task, cacheDir, alert)
+      await execute(io, run, settings, system, task, cacheDir, alert, begun)
       return `crew review finished.\n${summary(run)}`
     }),
   )
@@ -238,12 +239,13 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
   if (r === undefined) throw new BadInput(`run ${run.id} has no reviewer ${key}; it has ${run.reviewers.map(x => x.key).join(', ')}`)
   if (r.status === 'running') throw new BadInput(`${key} is still running`)
   if (f.background === false) {
-    await continueOne(io, run, r, settings, system, message, alert, signal)
+    await continueOne(io, run, r, settings, await ask(io, run, r, settings, system, message, signal), alert)
     return summary(run)
   }
+  const asked = await ask(io, run, r, settings, system, message)
   $.clock.after(0, () =>
     void finish($, `follow-up ${run.id}/${key}`, async () => {
-      await continueOne(io, run, r, settings, system, message, alert)
+      await continueOne(io, run, r, settings, asked, alert)
       return `crew follow-up to ${key} finished.\n${summary(run)}`
     }),
   )

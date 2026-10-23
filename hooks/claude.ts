@@ -95,21 +95,15 @@ export function fencedCommand(fence: Fence, command: string): string | undefined
   return `cd ${shq(root)} && ${args.map(shq).join(' ')}`
 }
 
-/**
- * Waits for the reviewer's turn to end while it is fenced. `start` (a message) runs after the
- * waiter is in place; it answers why it failed, or undefined.
- */
-async function await_(
-  io: Io,
-  agentId: string,
-  model: string,
-  fence: Fence,
-  j: Pick<Job, 'dir' | 'timeoutMs'>,
-  start: () => Promise<string | undefined>,
-): Promise<Outcome> {
+/** A reviewer turn under way; `wait` resolves with how it ended and lifts its fence. */
+export type Pending = { wait: () => Promise<Outcome> }
+
+const failed = (model: string, detail: string, continueId?: string): Pending => ({
+  wait: async () => ({ status: 'failed', text: '', model, detail, ...(continueId !== undefined ? { continueId } : {}) }),
+})
+
+function arm(io: Io, agentId: string, model: string, fence: Fence, j: Pick<Job, 'dir' | 'timeoutMs'>): Pending & { drop: () => void } {
   fences.set(agentId, fence)
-  let stop: (o: Outcome) => void = () => {}
-  const stopped = new Promise<Outcome>(resolve => (stop = resolve))
   const answered = new Promise<Outcome>(resolve => {
     answers.set(agentId, end => {
       if (end.reason !== 'answer' || end.answer.trim() === '') {
@@ -119,23 +113,35 @@ async function await_(
       resolve({ status: 'ok', text: end.answer, findings: parseFindings(end.answer), model, usage: end.usage, continueId: agentId })
     })
   })
+  let stop: (o: Outcome) => void = () => {}
+  const stopped = new Promise<Outcome>(resolve => (stop = resolve))
   const timer = io.after(j.timeoutMs, () =>
     stop({ status: 'timeout', text: '', model, continueId: agentId, detail: `no answer within ${j.timeoutMs / 1000} s` }),
   )
-  try {
-    const refused = await start()
-    if (refused !== undefined) return { status: 'failed', text: '', model, continueId: agentId, detail: refused }
-    const outcome = await Promise.race([answered, stopped])
-    await io.write(`${j.dir}/answer.txt`, outcome.text)
-    return outcome
-  } finally {
+  const drop = () => {
     timer.cancel()
     answers.delete(agentId)
     fences.delete(agentId)
   }
+  return {
+    drop,
+    wait: async () => {
+      try {
+        const outcome = await Promise.race([answered, stopped])
+        await io.write(`${j.dir}/answer.txt`, outcome.text)
+        return outcome
+      } finally {
+        drop()
+      }
+    },
+  }
 }
 
-export async function review(io: Io, j: Job, codexBin: string, description: string): Promise<Outcome> {
+/**
+ * Starts a reviewer. Called inside the tool call that asked for it: the engine runs this
+ * plugin's hooks on the calls of an agent started there, and not on one started from a timer.
+ */
+export async function begin(io: Io, j: Job, codexBin: string, description: string): Promise<Pending> {
   const spawned = await io.spawnAgent({
     subagentType: `crew:${j.web ? AGENT_WEB : AGENT}`,
     prompt: j.task,
@@ -143,16 +149,17 @@ export async function review(io: Io, j: Job, codexBin: string, description: stri
     ...(j.model !== undefined ? { model: j.model } : {}),
   })
   if (spawned.deny !== undefined || spawned.agentId === undefined) {
-    return { status: 'failed', text: '', model: j.model ?? 'inherit', detail: `the reviewer agent did not start: ${spawned.deny ?? 'no agent id'}` }
+    return failed(j.model ?? 'inherit', `the reviewer agent did not start: ${spawned.deny ?? 'no agent id'}`)
   }
-  const fence = { roots: j.roots, secrets: j.secrets, codexBin }
-  return await_(io, spawned.agentId, spawned.model, fence, j, async () => undefined)
+  return arm(io, spawned.agentId, spawned.model, { roots: j.roots, secrets: j.secrets, codexBin }, j)
 }
 
-export async function followUp(io: Io, f: FollowUp, codexBin: string): Promise<Outcome> {
-  const fence = { roots: f.roots, secrets: f.secrets, codexBin }
-  return await_(io, f.continueId, f.model ?? 'inherit', fence, f, async () => {
-    const sent = await io.send({ to: { agentId: f.continueId }, text: f.message })
-    return sent.isDelivered ? undefined : `the message did not reach the reviewer: ${sent.reason}`
-  })
+/** Sends a follow-up; called inside the tool call, as `begin` is. */
+export async function beginFollowUp(io: Io, f: FollowUp, codexBin: string): Promise<Pending> {
+  const model = f.model ?? 'inherit'
+  const pending = arm(io, f.continueId, model, { roots: f.roots, secrets: f.secrets, codexBin }, f)
+  const sent = await io.send({ to: { agentId: f.continueId }, text: f.message })
+  if (sent.isDelivered) return pending
+  pending.drop()
+  return failed(model, `the message did not reach the reviewer: ${sent.reason}`, f.continueId)
 }

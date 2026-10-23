@@ -44,9 +44,10 @@ async function settings(io: Io, j: Omit<Job, 'task'>, p: Paths): Promise<string>
   return JSON.stringify({ permissions: { deny } }, null, 2)
 }
 
+/** The agent file goes first: it creates the working folder that the deny rules keep open. */
 async function prepare(io: Io, j: Omit<Job, 'task'>, p: Paths): Promise<void> {
-  await io.write(`${p.home}/.gemini/antigravity-cli/settings.json`, await settings(io, j, p))
   await io.write(`${p.work}/.agents/agents/${AGENT}/agent.md`, agentFile(j.system, j.web, j.helpers))
+  await io.write(`${p.home}/.gemini/antigravity-cli/settings.json`, await settings(io, j, p))
 }
 
 export async function preflight(io: Io, bin: string, home: string): Promise<Preflight> {

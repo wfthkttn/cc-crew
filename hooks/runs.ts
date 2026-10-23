@@ -138,6 +138,31 @@ function apply(r: ReviewerState, o: Outcome, endedAt: number): void {
 /** Tells the person a provider needs them; answers why the message failed, or undefined. */
 export type Alert = (io: Io, provider: Provider, detail: string) => Promise<string | undefined>
 
+/**
+ * Starts the run's Claude reviewers. Called inside the tool call, before the rest of the run
+ * may go on in the background (`claude.begin` says why).
+ */
+export async function beginClaude(
+  io: Io,
+  run: Run,
+  s: Settings,
+  system: string,
+  task: string,
+): Promise<Map<string, claude.Pending>> {
+  const begun = new Map<string, claude.Pending>()
+  for (const r of run.reviewers) {
+    if (r.provider !== 'claude') continue
+    const j = job(run, r, system, task, s)
+    try {
+      begun.set(r.key, await claude.begin(io, j, s.codexBin, `crew review: ${run.description}`))
+    } catch (err) {
+      const detail = `the reviewer agent did not start: ${String(err)}`
+      begun.set(r.key, { wait: async () => ({ status: 'failed', text: '', model: r.model ?? 'inherit', detail }) })
+    }
+  }
+  return begun
+}
+
 async function runOne(
   io: Io,
   run: Run,
@@ -147,6 +172,7 @@ async function runOne(
   task: string,
   cacheDir: string,
   alert: Alert,
+  begun: ReadonlyMap<string, claude.Pending>,
   signal?: AbortSignal,
 ): Promise<void> {
   let o: Outcome
@@ -163,9 +189,12 @@ async function runOne(
         case 'antigravity':
           o = await agy.review(io, s.agyBin, j)
           break
-        case 'claude':
-          o = await claude.review(io, j, s.codexBin, `crew review: ${run.description}`)
+        case 'claude': {
+          const pending = begun.get(r.key)
+          if (pending === undefined) throw new Error(`crew: the Claude reviewer ${r.key} was not started inside the tool call`)
+          o = await pending.wait()
           break
+        }
         case 'claude-p':
           o = { status: 'failed', text: '', model: 'none', detail: 'claude-p is a stub: not built yet' }
           break
@@ -190,24 +219,27 @@ export async function execute(
   task: string,
   cacheDir: string,
   alert: Alert,
+  begun: ReadonlyMap<string, claude.Pending>,
   signal?: AbortSignal,
 ): Promise<void> {
   runs.set(run.id, run)
   await save(io, run)
-  await Promise.all(run.reviewers.map(r => runOne(io, run, r, s, system, task, cacheDir, alert, signal)))
+  await Promise.all(run.reviewers.map(r => runOne(io, run, r, s, system, task, cacheDir, alert, begun, signal)))
   await save(io, run)
 }
 
-export async function continueOne(
+export type Asked = { f: FollowUp; n: string; pending?: claude.Pending }
+
+/** Marks the reviewer running and, for a Claude reviewer, sends the message: inside the tool call. */
+export async function ask(
   io: Io,
   run: Run,
   r: ReviewerState,
   s: Settings,
   system: string,
   message: string,
-  alert: Alert,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<Asked> {
   if (r.continueId === undefined) throw new Error(`crew: ${r.key} in run ${run.id} has no conversation to continue`)
   const n = (await io.now()).toString(36)
   const f: FollowUp = {
@@ -220,6 +252,13 @@ export async function continueOne(
   r.status = 'running'
   r.startedAt = await io.now()
   await save(io, run)
+  if (r.provider !== 'claude') return { f, n }
+  return { f, n, pending: await claude.beginFollowUp(io, f, s.codexBin) }
+}
+
+export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Settings, asked: Asked, alert: Alert): Promise<void> {
+  const { f, n } = asked
+  const message = f.message
   let o: Outcome
   try {
     switch (r.provider) {
@@ -230,7 +269,8 @@ export async function continueOne(
         o = await agy.followUp(io, s.agyBin, f)
         break
       case 'claude':
-        o = await claude.followUp(io, f, s.codexBin)
+        if (asked.pending === undefined) throw new Error(`crew: the follow-up to ${r.key} was not sent inside the tool call`)
+        o = await asked.pending.wait()
         break
       case 'claude-p':
         o = { status: 'failed', text: '', model: 'none', detail: 'claude-p is a stub: not built yet' }
