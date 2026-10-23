@@ -62,9 +62,8 @@ function totalsOf(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], r
   ]
 }
 
-export function runningProps(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], record: SessionRecord, usd: number | null, now: number): RunningProps {
+export function runningProps(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], record: SessionRecord, now: number): RunningProps {
   return {
-    usd,
     totals: totalsOf(sessionRuns, agents, record),
     runs: sessionRuns.filter(isRunning).map(run => ({
       id: run.id,
@@ -208,7 +207,6 @@ export type ViewInput = {
   page: number
   rows: number
   now: number
-  usd: number | null
   opened: Target | null
   sessionRuns: readonly Run[]
   agents: readonly ClaudeAgent[]
@@ -217,7 +215,7 @@ export type ViewInput = {
 }
 
 export function overviewProps(v: ViewInput): OverviewProps {
-  const running = runningProps(v.sessionRuns, v.agents, v.record, v.usd, v.now)
+  const running = runningProps(v.sessionRuns, v.agents, v.record, v.now)
   const log = logProps(v.sessionRuns, v.agents, v.page)
   return {
     tab: v.tab,

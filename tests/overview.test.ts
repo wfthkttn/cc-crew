@@ -72,7 +72,6 @@ function props(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = 
     page,
     rows,
     now: AT + 252_000,
-    usd: 12.4,
     opened,
     sessionRuns: [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])],
     agents: AGENTS,
@@ -94,21 +93,20 @@ test('every view fits the drawer, under a tab row that counts what runs and what
 test("Running: the session's spend as a table, then the live run with its buttons, then the live Claude agent", () => {
   const p = props('running')
   const lines = text(p)
-  expect(lines[2]).toStartWith('This session · Claude $12.40 so far')
-  expect(lines[3]).toMatch(/count +new +cached +out/)
-  expect(lines[5]).toMatch(/^Claude +7 turns +200k +1\.0M +30k/)
-  expect(lines[6]).toMatch(/^Reviews +2 runs +900 +2k +120/)
-  expect(lines[7]).toMatch(/^ {2}codex +300 +600 +40/)
-  expect(lines[9]).toMatch(/^Agents +2 +10k +40k +2k/)
-  expect(lines[11]).toStartWith('Crew reviews')
-  expect(lines[12]).toContain('review r1')
-  expect(lines[12]).toContain('▐⧉ Details▌ ▐■ Stop▌')
-  expect(lines[13]).toContain('▐■ Stop▌')
-  expect(lines[14]).toContain('300 new · 40 out')
-  expect(lines[15]).toStartWith('Claude agents')
-  expect(lines[16]).toContain('find the parser')
-  expect(actionAt(p, lines[12]!.indexOf('Details'), 12)).toEqual({ open: { run: 'r1' } })
-  expect(actionAt(p, 5, 16)).toEqual({ open: { agent: 'a1' } })
+  expect(lines[2]).toMatch(/count +new +cached +out/)
+  expect(lines[4]).toMatch(/^Claude +7 turns +200k +1\.0M +30k/)
+  expect(lines[5]).toMatch(/^Reviews +2 runs +900 +2k +120/)
+  expect(lines[6]).toMatch(/^ {2}codex +300 +600 +40/)
+  expect(lines[8]).toMatch(/^Agents +2 +10k +40k +2k/)
+  expect(lines[10]).toStartWith('Crew reviews')
+  expect(lines[11]).toContain('review r1')
+  expect(lines[11]).toContain('▐⧉ Details▌ ▐■ Stop▌')
+  expect(lines[12]).toContain('▐■ Stop▌')
+  expect(lines[13]).toContain('300 new · 40 out')
+  expect(lines[14]).toStartWith('Claude agents')
+  expect(lines[15]).toContain('find the parser')
+  expect(actionAt(p, lines[11]!.indexOf('Details'), 11)).toEqual({ open: { run: 'r1' } })
+  expect(actionAt(p, 5, 15)).toEqual({ open: { agent: 'a1' } })
 })
 
 test('Log: one row per finished run or agent, newest first; a press on a row opens it', () => {

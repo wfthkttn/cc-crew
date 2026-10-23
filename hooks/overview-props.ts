@@ -41,8 +41,6 @@ export type TotalRow = TokenCells & { label: string; count: string; isPart: bool
 
 /** The first tab: what the session spent, then what runs now. */
 export type RunningProps = {
-  /** The session's /cost at API prices, agents included; null where the host keeps none. */
-  usd: number | null
   totals: TotalRow[]
   runs: RunRow[]
   agents: AgentRow[]

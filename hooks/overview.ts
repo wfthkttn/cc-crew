@@ -75,9 +75,7 @@ function tabLines(props: OverviewProps): Line[] {
 }
 
 function runningLines(props: RunningProps): Line[] {
-  const title = `This session${props.usd === null ? '' : ` · Claude $${props.usd.toFixed(2)} so far`}`
   const spent = [
-    heading(title),
     ...table(
       TOTAL_COLUMNS,
       0,

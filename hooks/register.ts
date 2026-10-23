@@ -523,12 +523,10 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     let filled: unknown = tree
     if (isDrawer) {
-      const usd = view.tab === 'running' ? ((await $.session.usage()).cost?.usd ?? null) : null
       const props = overviewProps({
         ...view,
         rows: room.drawer,
         now,
-        usd,
         opened: detail?.target ?? null,
         sessionRuns: sessionRuns(),
         agents: claudeAgents.all(),
