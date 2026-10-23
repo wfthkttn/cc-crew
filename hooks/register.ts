@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import type { SidebarDrawerSlot, SidebarPopoutSlot, SidebarRowComponent } from 'sidebar'
+import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 'sidebar'
 
 import { ClaudeAgents } from './agents.ts'
 import { wrap } from './detail.ts'
@@ -7,7 +7,8 @@ import { type ChangeSpec, changeOf } from './changes.ts'
 import * as claude from './claude.ts'
 import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
-import { agentRefusal, claudeModel, followUpRefusal, GATES, type Gate, reviewerModel, reviewRefusal } from './limits.ts'
+import { type Catalog, groupOf, loadCatalog, modelKey, readCodexCatalog, withCodex } from './catalog.ts'
+import { agentRefusal, followUpRefusal, GATES, type Gate, reviewRefusal, sum } from './limits.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
 import type { DetailProps, Tab, Target } from './overview-props.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
@@ -31,7 +32,7 @@ import {
 import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens } from './usage.ts'
-import { type Badge, RAISE_BY, agentDetail, badgeOf, limitsOf, limitsProps, modelDetail, overviewProps, runDetail, spentOf } from './views.ts'
+import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf, usageDetail } from './views.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -110,7 +111,7 @@ const approvedDir = () => `${cacheDir}/approved`
 
 const TAB_ID = 'crew'
 const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
-const POPOUT_SLOT: SidebarPopoutSlot = `sidebar-popout:${TAB_ID}`
+const MODAL_SLOT: SidebarModalSlot = `sidebar-modal:${TAB_ID}`
 const OVERVIEW_KEY = 'crew-overview'
 const DETAIL_KEY = 'crew-detail'
 /** The sidebar's drawer frame: a border and a padding column on each side. */
@@ -132,15 +133,25 @@ const TICK_MS = 1000
 
 let sessionId = ''
 const claudeAgents = new ClaudeAgents()
-/** What the pop-out shows: a run or agent with its brief or prompt as read from `path` when it was opened; a model, worked out on each draw. */
-let detail: { target: Target; text: string; path: string | null } | null = null
+/** What the modal shows: a run or agent with its brief or prompt as read when it was opened, or a group or model worked out on each draw; the page it is at. */
+let detail: { target: Target; text: string; page: number } | null = null
 let ticker: { cancel(): void } | null = null
 let record: SessionRecord = emptyRecord()
 let view: { tab: Tab; page: number } = { tab: 'running', page: 0 }
 
 const sessionRuns = () => [...runs.values()].filter(run => run.sessionId === sessionId)
-const currentLimits = () => limitsOf(settings.limits, record)
-const currentSpent = () => spentOf(sessionRuns(), claudeAgents.all())
+/** crew's models.json with the person's over it and what Codex says of itself; set at session start. */
+let catalog: Catalog | null = null
+/** Why the catalog stands on models.json alone where it would ask a tool, shown under Usage. */
+let catalogNote: string | null = null
+function liveCatalog(): Catalog {
+  if (catalog === null) throw new Error('crew: the model catalog is used before session start')
+  return catalog
+}
+const currentLimits = () => limitsOf(liveCatalog(), settings.fallbackUsd, record)
+const currentSpent = () => spentOf(itemsOf(liveCatalog(), sessionRuns(), claudeAgents.all()))
+/** The quota group a model counts in. */
+const groupFor = (provider: Provider, model: string | undefined) => groupOf(liveCatalog(), modelKey(liveCatalog(), provider, model)).group
 
 async function keep($: EngineInterface): Promise<void> {
   record.agents = claudeAgents.all()
@@ -162,39 +173,44 @@ async function loadSessionRuns($: EngineInterface): Promise<void> {
 
 const promptPath = (agentId: string) => `${cacheDir}/sessions/${sessionId}/prompts/${agentId}.md`
 
-/** Text as the pop-out's room allows, the last line saying how much is left out and, for a file, where the rest is. */
-export function detailProps(title: string, text: string, path: string | null, rows: number): DetailProps {
-  const lines = wrap(text, OVERVIEW_COLUMNS)
-  const room = Math.max(1, rows - 1)
-  if (lines.length <= room) return { title, lines }
-  const kept = lines.slice(0, room - 1)
-  return { title, lines: [...kept, `… ${lines.length - kept.length} more lines${path === null ? '' : ` in ${path}`}`] }
+/** One page of the text, wrapped to the modal's width: the rows it has less the title row and, when it pages, the row of page buttons. */
+export function detailProps(title: string, text: string, room: { rows: number; columns: number }, page: number): DetailProps {
+  const lines = wrap(text, room.columns)
+  const isOnePage = lines.length <= room.rows - 1
+  const size = isOnePage ? lines.length : Math.max(1, room.rows - 2)
+  const pages = Math.max(1, Math.ceil(lines.length / size))
+  const at = Math.min(page, pages - 1)
+  const shown = lines.slice(at * size, at * size + size)
+  return { title, lines: shown, columns: room.columns, page: at, pages, first: at * size + 1, last: at * size + shown.length, total: lines.length }
 }
 
 /** The pop-out's title and text for what it shows, from the run's, agent's or model's state now; null once it is gone. */
 function shownDetail(shown: NonNullable<typeof detail>, now: number): { title: string; text: string } | null {
-  if ('model' in shown.target) {
-    return { title: shown.target.model, text: modelDetail(shown.target.model, sessionRuns(), claudeAgents.all(), currentLimits(), now) }
+  const target = shown.target
+  if ('group' in target || 'model' in target) {
+    const items = itemsOf(liveCatalog(), sessionRuns(), claudeAgents.all())
+    const title = 'model' in target ? target.model : (liveCatalog().groups.find(g => g.id === target.group)?.name ?? target.group)
+    return { title, text: usageDetail(liveCatalog(), items, currentLimits(), target, now) }
   }
-  if ('run' in shown.target) {
-    const run = runs.get(shown.target.run)
+  if ('run' in target) {
+    const run = runs.get(target.run)
     return run === undefined ? null : { title: `review: ${run.description}`, text: runDetail(run, shown.text) }
   }
-  const id = shown.target.agent
+  const id = target.agent
   const agent = claudeAgents.all().find(a => a.id === id)
   return agent === undefined ? null : { title: `${agent.type}: ${agent.description}`, text: agentDetail(agent, shown.text, now) }
 }
 
-/** Opens the run's or agent's details in the pop-out, or closes them when they are what it shows. */
+/** Opens the details in the modal, or closes them when they are what it shows. */
 async function open($: EngineInterface, target: Target): Promise<void> {
   if (detail !== null && JSON.stringify(detail.target) === JSON.stringify(target)) {
     detail = null
-    await $.sidebar.popout({ id: TAB_ID, isShown: false })
+    await $.sidebar.modal({ id: TAB_ID, isShown: false })
     return
   }
-  if ('model' in target) {
-    detail = { target, text: '', path: null }
-    await $.sidebar.popout({ id: TAB_ID, isShown: true })
+  if ('group' in target || 'model' in target) {
+    detail = { target, text: '', page: 0 }
+    await $.sidebar.modal({ id: TAB_ID, isShown: true })
     return
   }
   let path: string
@@ -206,8 +222,8 @@ async function open($: EngineInterface, target: Target): Promise<void> {
     path = promptPath(target.agent)
   }
   const text = (await $.fs.exists(path)) ? await $.fs.read(path) : `(not kept: ${path} does not exist; the agent started before crew kept prompts)`
-  detail = { target, text, path }
-  await $.sidebar.popout({ id: TAB_ID, isShown: true })
+  detail = { target, text, page: 0 }
+  await $.sidebar.modal({ id: TAB_ID, isShown: true })
 }
 
 /**
@@ -217,7 +233,7 @@ async function open($: EngineInterface, target: Target): Promise<void> {
 let badge: Badge | null = null
 
 async function syncBadge($: EngineInterface): Promise<void> {
-  const next = badgeOf(sessionRuns(), claudeAgents.all(), limitsProps(currentLimits(), currentSpent()))
+  const next = badgeOf(sessionRuns(), claudeAgents.all(), limitsProps(liveCatalog(), currentLimits(), currentSpent()))
   if (badge !== null && next.count === badge.count && next.level === badge.level) return
   badge = next
   await $.sidebar.badge({ id: TAB_ID, ...next })
@@ -350,8 +366,8 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   const description = str(f, 'description')
   const brief = str(f, 'prompt')
   const specs = reviewersOf(f)
-  const models = specs.map(s => reviewerModel(s.provider, s.model))
-  const refusal = reviewRefusal(currentLimits(), currentSpent(), specs.map(s => s.provider), models)
+  const groups = specs.map(s => groupFor(s.provider, s.model))
+  const refusal = reviewRefusal(currentLimits(), currentSpent(), specs.map(s => s.provider), groups)
   if (refusal !== undefined) throw new BadInput(refusal)
   const read = readOf(f)
   const changes = changesOf(f)
@@ -409,7 +425,7 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
   const r = run.reviewers.find(x => x.key === key)
   if (r === undefined) throw new BadInput(`run ${run.id} has no reviewer ${key}; it has ${run.reviewers.map(x => x.key).join(', ')}`)
   if (r.status === 'running') throw new BadInput(`${key} is still running`)
-  const refusal = followUpRefusal(currentLimits(), currentSpent(), r.provider, reviewerModel(r.provider, r.usedModel ?? r.model))
+  const refusal = followUpRefusal(currentLimits(), currentSpent(), r.provider, groupFor(r.provider, r.usedModel ?? r.model))
   if (refusal !== undefined) throw new BadInput(refusal)
   if (f.background === false) {
     await continueOne(io, run, r, settings, await ask(io, run, r, settings, system, message, signal), alert)
@@ -475,6 +491,21 @@ export const register: Register = (on, options) => {
       description: "This session's crew review runs and the Antigravity quota.",
       inputSchema: STATUS_SCHEMA,
     })
+    const files = await loadCatalog(ioOf($), $.plugin.root, home)
+    catalog = files
+    catalogNote = null
+    $.clock.after(0, () =>
+      void readCodexCatalog(ioOf($), settings.codexBin).then(
+        codex => {
+          catalog = withCodex(files, codex)
+          $.ui.invalidate('ui.render')
+        },
+        (err: unknown) => {
+          catalogNote = `Codex's models not read (${String(err)}); models.json stands for them.`
+          $.ui.invalidate('ui.render')
+        },
+      ),
+    )
     sessionId = await $.session.id()
     record = await loadRecord(ioOf($), recordPath(cacheDir, sessionId))
     claudeAgents.restore(record.agents, await $.agent.list())
@@ -490,7 +521,7 @@ export const register: Register = (on, options) => {
     // crew's own reviewers show under their run and count against the review limits.
     if (e.subagentType.startsWith('crew:')) return next(e)
     // An agent type with a model of its own is gated on the asked or the parent's: the plugin API does not tell its type's model.
-    const refusal = agentRefusal(currentLimits(), currentSpent(), claudeModel(e.model ?? e.parentModel))
+    const refusal = agentRefusal(currentLimits(), currentSpent(), groupFor('claude', e.model ?? e.parentModel))
     if (refusal !== undefined) return { deny: `crew: ${refusal}` }
     const spawned = await next(e)
     if (spawned.deny === undefined && spawned.agentId !== undefined) {
@@ -516,7 +547,7 @@ export const register: Register = (on, options) => {
       toggle?: unknown
       switchLimits?: unknown
       stop?: { run?: unknown; key?: unknown }
-      open?: { run?: unknown; agent?: unknown; model?: unknown }
+      open?: { run?: unknown; agent?: unknown; group?: unknown; model?: unknown }
     }
     if (data.switchLimits === true) {
       record.isLimitsOff = !record.isLimitsOff
@@ -524,9 +555,10 @@ export const register: Register = (on, options) => {
     }
     if (data.tab === 'running' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
-    const raised = (data.raise as { model?: unknown } | undefined)?.model
-    if (typeof raised === 'string') {
-      record.raises = { models: { ...record.raises.models, [raised]: (record.raises.models[raised] ?? 0) + RAISE_BY } }
+    const raise = data.raise as { group?: unknown; usd?: unknown } | undefined
+    if (typeof raise?.group === 'string' && (RAISES_USD as readonly unknown[]).includes(raise.usd)) {
+      const group = raise.group
+      record.raises = { groups: { ...record.raises.groups, [group]: (record.raises.groups[group] ?? 0) + (raise.usd as number) } }
       await keep($)
     }
     if (typeof data.toggle === 'string' && (GATES as readonly string[]).includes(data.toggle)) {
@@ -542,17 +574,20 @@ export const register: Register = (on, options) => {
     }
     if (typeof data.open?.run === 'string') await open($, { run: data.open.run })
     if (typeof data.open?.agent === 'string') await open($, { agent: data.open.agent })
+    if (typeof data.open?.group === 'string') await open($, { group: data.open.group })
     if (typeof data.open?.model === 'string') await open($, { model: data.open.model })
     $.ui.invalidate('ui.render')
     return next(e)
   })
 
   on('ui.message', { element: DETAIL_KEY }, async ($, e, next) => {
-    if ((e.data as { close?: unknown }).close === true) {
+    const data = e.data as { close?: unknown; page?: unknown }
+    if (data.close === true) {
       detail = null
-      await $.sidebar.popout({ id: TAB_ID, isShown: false })
-      $.ui.invalidate('ui.render')
+      await $.sidebar.modal({ id: TAB_ID, isShown: false })
     }
+    if (detail !== null && (data.page === 1 || data.page === -1)) detail = { ...detail, page: Math.max(0, detail.page + data.page) }
+    $.ui.invalidate('ui.render')
     return next(e)
   })
 
@@ -560,7 +595,7 @@ export const register: Register = (on, options) => {
     const tree = await next(e)
     if (e.surface !== 'terminal') return tree
     const isDrawer = hasSlot(tree, DRAWER_SLOT)
-    const shown = detail !== null && hasSlot(tree, POPOUT_SLOT) ? detail : null
+    const shown = detail !== null && hasSlot(tree, MODAL_SLOT) ? detail : null
     if (!isDrawer && shown === null) return tree
     const room = await $.sidebar.room({})
     if (room === null) return tree
@@ -573,18 +608,21 @@ export const register: Register = (on, options) => {
         rows: room.drawer,
         now,
         opened: detail?.target ?? null,
+        catalog: liveCatalog(),
+        catalogNote,
         sessionRuns: sessionRuns(),
         agents: claudeAgents.all(),
         record,
-        limits: settings.limits,
+        fallbackUsd: settings.fallbackUsd,
       })
       const height = Math.min(room.drawer, overviewLines(props).length)
       filled = fillSlot(filled, DRAWER_SLOT, () => Client({ key: OVERVIEW_KEY, module: './overview.ts', props, width: OVERVIEW_COLUMNS, height }))
     }
     const shownNow = shown === null ? null : shownDetail(shown, now)
     if (shown !== null && shownNow !== null) {
-      const props = detailProps(shownNow.title, shownNow.text, shown.path, room.popout)
-      filled = fillSlot(filled, POPOUT_SLOT, () => Client({ key: DETAIL_KEY, module: './detail.ts', props, width: OVERVIEW_COLUMNS, height: props.lines.length + 1 }))
+      const props = detailProps(shownNow.title, shownNow.text, room.modal, shown.page)
+      const height = 1 + props.lines.length + (props.pages > 1 ? 1 : 0)
+      filled = fillSlot(filled, MODAL_SLOT, () => Client({ key: DETAIL_KEY, module: './detail.ts', props, width: props.columns, height }))
     }
     return filled as typeof tree
   })
@@ -628,7 +666,11 @@ export const register: Register = (on, options) => {
     const tokens = e.usage === undefined ? undefined : claudeTokens(e.usage)
     if (e.agentId === undefined) {
       record.turns += 1
-      if (tokens !== undefined) record.main = { in: record.main.in + tokens.in, cached: record.main.cached + tokens.cached, out: record.main.out + tokens.out }
+      if (e.usage !== undefined && tokens !== undefined) {
+        const key = modelKey(liveCatalog(), 'claude', e.usage.model)
+        record.main = sum([record.main, tokens])
+        record.chat = { ...record.chat, [key]: sum([record.chat[key], tokens]) }
+      }
       await keep($)
     } else {
       claude.settle(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage })

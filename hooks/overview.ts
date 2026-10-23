@@ -117,7 +117,7 @@ const LIVE_WHAT_COLUMNS = 30
 
 type Column = { title: string; width: number; isNumber?: boolean }
 /** A table row: `action` makes the whole row a press; `isOpened` marks it. */
-type TableRow = { cells: string[]; action?: OverviewAction; isOpened?: boolean }
+type TableRow = { cells: string[]; isBold?: boolean; action?: OverviewAction; isOpened?: boolean }
 
 /** Columns a space apart, numbers to the right, under a header and a rule. */
 function table(columns: readonly Column[], rows: readonly TableRow[]): Line[] {
@@ -131,7 +131,7 @@ function table(columns: readonly Column[], rows: readonly TableRow[]): Line[] {
         {
           text: columns.map((c, i) => cell(row.cells[i] ?? '', c)).join(' '),
           color: row.isOpened === true ? HEADING : TEXT,
-          ...(row.isOpened === true ? { bold: true } : {}),
+          ...(row.isOpened === true || row.isBold === true ? { bold: true } : {}),
           ...(row.action === undefined ? {} : { action: row.action }),
         },
       ],
@@ -146,16 +146,24 @@ const USAGE_COLUMNS: readonly Column[] = [
   { title: 'new', width: 6, isNumber: true },
   { title: 'cached', width: 7, isNumber: true },
   { title: 'out', width: 6, isNumber: true },
-  { title: 'weighted', width: 8, isNumber: true },
+  { title: '$ API', width: 8, isNumber: true },
 ]
 
-/** Claude's own chat, then each model; a model's row opens its reviewers and agents. */
+/** This chat, then each quota group in bold with its models under it; a group's or model's row opens its reviewers and agents. */
 function usageLines(props: UsageProps, opened: OverviewProps['opened']): Line[] {
   const rows = props.rows.map(r => ({
-    cells: [r.label, r.count, r.new, r.cached, r.out, r.weighted],
-    ...(r.model === null ? {} : { action: { open: { model: r.model } }, isOpened: isSame(opened, { model: r.model }) }),
+    cells: [`${r.isPart ? '  ' : ''}${r.label}${r.isGuessed ? ' ?' : ''}`, r.count, r.new, r.cached, r.out, r.usd],
+    isBold: !r.isPart,
+    ...(r.open === null ? {} : { action: { open: r.open }, isOpened: isSame(opened, r.open) }),
   }))
-  return [...table(USAGE_COLUMNS, rows), [{ text: '' }], muted('Press a model for its reviewers and agents.')]
+  return [
+    ...table(USAGE_COLUMNS, rows),
+    [{ text: '' }],
+    ...props.note.map(line => [{ text: line, color: OVER }]),
+    ...(props.isGuessing ? [muted('? not in models.json: counted in its vendor\'s first group,'), muted('  at its group\'s dearest price.')] : []),
+    muted('$ at API prices weighs each model as its quota does.'),
+    muted('Press a group or model for its reviewers and agents.'),
+  ]
 }
 
 /** time, what, status, took, new, out: the what column takes what the others leave. */
@@ -199,9 +207,9 @@ function logLines(props: LogProps, rows: number, opened: OverviewProps['opened']
   return [...lines, nav]
 }
 
-/** Room for a limit name such as `agy gemini-3.8-flash`. */
-const LIMIT_LABEL_COLUMNS = 24
-/** The limit beside what was spent: `10M`. */
+/** Room for a group's name such as `Claude and GPT`. */
+const LIMIT_LABEL_COLUMNS = 20
+/** The limit beside what was spent: `$10.00`. */
 const LIMIT_COLUMNS = 10
 
 function limitsLines(props: LimitsProps): Line[] {
@@ -212,14 +220,10 @@ function limitsLines(props: LimitsProps): Line[] {
   ]
   const row = (r: LimitRow): Line => [
     { text: fit(r.label, LIMIT_LABEL_COLUMNS), color: r.isOver ? OVER : TEXT },
-    { text: right(r.spent, 6) + ' / ', color: r.isOver ? OVER : MUTED },
+    { text: right(r.spent, 8) + ' / ', color: r.isOver ? OVER : MUTED },
     { text: fit(r.limit, LIMIT_COLUMNS), color: MUTED },
-    ...pill(r.raiseLabel, { raise: r.raise }),
+    ...r.raises.flatMap((b, i) => [...(i > 0 ? [{ text: ' ' }] : []), ...pill(b.label, { raise: b.raise })]),
   ]
-  const models: Line[] =
-    props.models.length === 0
-      ? [muted(`Nothing ran on a model yet; each may spend ${props.modelDefault}.`)]
-      : props.models.map(row)
   const gates: Line = [
     { text: fit('Allowed', 15), color: TEXT, bold: true },
     ...props.gates.flatMap(g => [...pill(`${g.isOpen ? '●' : '○'} ${g.gate}`, { toggle: g.gate }, !g.isOpen), { text: ' ' }]),
@@ -227,16 +231,14 @@ function limitsLines(props: LimitsProps): Line[] {
   return [
     on,
     [{ text: '' }],
-    heading('Weighted tokens by model'),
-    ...models,
+    heading('Quota groups, $ at API prices this session'),
+    ...props.groups.map(row),
     [{ text: '' }],
     gates,
     [{ text: '' }],
-    muted('Weighted tokens, as API prices weigh them: new input 1,'),
-    muted('cache reads 0.1, cache writes 1.25, output 5. Reviewers and'),
-    muted(`Claude's agents on one model share its limit; one not listed`),
-    muted(`may spend ${props.modelDefault}. Raises and switches hold for this session;`),
-    muted('defaults in /config.'),
+    muted("A group's models share its quota, each weighed by its price;"),
+    muted("reviewers and Claude's agents count alike. Groups, prices and"),
+    muted('limits: models.json; raises and switches hold for this session.'),
   ]
 }
 

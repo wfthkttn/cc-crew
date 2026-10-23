@@ -19,6 +19,7 @@
         installPhase = ''
           mkdir -p $out/share/crew/claude-code/.claude-plugin
           cp .claude-plugin/plugin.json $out/share/crew/claude-code/.claude-plugin/
+          cp models.json $out/share/crew/claude-code/
           cp -r hooks $out/share/crew/claude-code/hooks
         '';
       };

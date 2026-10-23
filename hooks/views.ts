@@ -1,9 +1,11 @@
 import type { SidebarBadgeLevel } from 'sidebar'
 
 import { type ClaudeAgent, LIVE } from './agents.ts'
-import type { Settings } from './config.ts'
-import { type Limits, type Spent, GATES, claudeModel, modelLimit, reviewerModel, sum, weighted } from './limits.ts'
-import type { LimitsProps, LogProps, LogRow, OverviewProps, ReviewerRow, RunningProps, Tab, Target, TokenCells, UsageProps } from './overview-props.ts'
+import { type Catalog, costOf, groupOf, modelKey, priceOf } from './catalog.ts'
+import { wrap } from './detail.ts'
+import { OVERVIEW_COLUMNS } from './overview.ts'
+import { type Limits, type Spent, GATES, groupLimit, sum, usd } from './limits.ts'
+import type { LimitsProps, LogProps, LogRow, OverviewProps, ReviewerRow, RunningProps, Tab, Target, TokenCells, UsageProps, UsageRow } from './overview-props.ts'
 import type { SessionRecord } from './record.ts'
 import type { ReviewerState, Run } from './runs.ts'
 import { type Tokens, shortCount } from './usage.ts'
@@ -47,54 +49,68 @@ function reviewerRow(r: ReviewerState, now: number): ReviewerRow {
 const isRunning = (run: Run) => run.reviewers.some(r => r.status === 'running')
 const agentType = (a: ClaudeAgent) => (a.workflow === undefined ? a.type : 'workflow')
 
-/** One reviewer or agent as a model's usage lists it. */
-type ModelItem = { what: string; status: string; startedAt: number; endedAt?: number; tokens?: Tokens }
+/** One reviewer or agent as usage lists it: the model it ran (catalog key), its group, and what it cost at API prices. */
+export type UsageItem = { key: string; group: string; what: string; status: string; startedAt: number; endedAt?: number; tokens?: Tokens; usd: number }
 
-/** Each reviewer and agent the session started, under the model limit it counts against, by limit name. */
-function byModel(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[]): Map<string, ModelItem[]> {
-  const models = new Map<string, ModelItem[]>()
-  const add = (model: string, item: ModelItem) => models.set(model, [...(models.get(model) ?? []), item])
-  for (const run of sessionRuns) {
-    for (const r of run.reviewers) {
-      const what = `review: ${run.description} (${r.key})`
-      add(reviewerModel(r.provider, r.usedModel ?? r.model), { what, status: r.status, startedAt: r.startedAt, ...ends(r.endedAt), ...spent(r.tokens) })
+/** What a model's tokens cost, and whether the catalog placed and priced the model or crew stood in for it. */
+function costed(catalog: Catalog, key: string, tokens: Tokens | undefined) {
+  const { group, isPlaced } = groupOf(catalog, key)
+  const { price, isPriced } = priceOf(catalog, key)
+  return { group: group.id, usd: costOf(tokens, price), isGuessed: !isPlaced || !isPriced }
+}
+
+/** Each reviewer and agent the session started, with its model, group and cost. */
+export function itemsOf(catalog: Catalog, sessionRuns: readonly Run[], agents: readonly ClaudeAgent[]): UsageItem[] {
+  const item = (key: string, what: string, status: string, startedAt: number, endedAt: number | undefined, tokens: Tokens | undefined): UsageItem => {
+    const { group, usd } = costed(catalog, key, tokens)
+    return { key, group, what, status, startedAt, usd, ...(endedAt === undefined ? {} : { endedAt }), ...(tokens === undefined ? {} : { tokens }) }
+  }
+  return [
+    ...sessionRuns.flatMap(run =>
+      run.reviewers.map(r => item(modelKey(catalog, r.provider, r.usedModel ?? r.model), `review: ${run.description} (${r.key})`, r.status, r.startedAt, r.endedAt, r.tokens)),
+    ),
+    ...agents.map(a => item(modelKey(catalog, 'claude', a.model), `${agentType(a)}: ${a.description}`, a.status, a.startedAt, a.endedAt, a.tokens)),
+  ]
+}
+
+const modelName = (key: string) => key.slice(key.indexOf('/') + 1)
+
+/** What the session spent: this chat, then each group with its models under it, reviewers and agents together. */
+export function usageProps(catalog: Catalog, items: readonly UsageItem[], record: SessionRecord, note: string | null): UsageProps {
+  const chat = Object.entries(record.chat).map(([key, t]) => costed(catalog, key, t).usd)
+  const rows: UsageRow[] = [
+    { label: 'this chat', count: `${record.turns} turns`, usd: usd(chat.reduce((n, x) => n + x, 0)), isPart: false, isGuessed: false, open: null, ...cells(record.main) },
+  ]
+  for (const group of catalog.groups) {
+    const inGroup = items.filter(i => i.group === group.id)
+    if (inGroup.length === 0) continue
+    rows.push({ label: group.name, ...totals(inGroup), isPart: false, isGuessed: false, open: { group: group.id } })
+    for (const key of [...new Set(inGroup.map(i => i.key))].sort()) {
+      rows.push({ label: modelName(key), ...totals(inGroup.filter(i => i.key === key)), isPart: true, isGuessed: costed(catalog, key, undefined).isGuessed, open: { model: key } })
     }
   }
-  for (const a of agents) {
-    add(agentModel(a), { what: `${agentType(a)}: ${a.description}`, status: a.status, startedAt: a.startedAt, ...ends(a.endedAt), ...spent(a.tokens) })
-  }
-  return models
+  return { rows, isGuessing: rows.some(r => r.isGuessed), note: note === null ? [] : wrap(note, OVERVIEW_COLUMNS) }
 }
 
-const ends = (at: number | undefined) => (at === undefined ? {} : { endedAt: at })
-const spent = (t: Tokens | undefined) => (t === undefined ? {} : { tokens: t })
-
-/** What the session spent: Claude's own chat, then each model, its reviewers and agents together. */
-export function usageProps(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], record: SessionRecord): UsageProps {
-  const models = [...byModel(sessionRuns, agents)].sort(([a], [b]) => a.localeCompare(b))
-  return {
-    rows: [
-      { label: 'this chat', count: `${record.turns} turns`, weighted: shortCount(weighted(record.main)), model: null, ...cells(record.main) },
-      ...models.map(([model, items]) => {
-        const total = sum(items.map(i => i.tokens))
-        return { label: model, count: String(items.length), weighted: shortCount(weighted(total)), model, ...cells(total) }
-      }),
-    ],
-  }
+function totals(items: readonly UsageItem[]) {
+  return { count: String(items.length), usd: usd(items.reduce((n, i) => n + i.usd, 0)), ...cells(sum(items.map(i => i.tokens))) }
 }
 
-/** A model's details for the pop-out: what it spent against its limit, then each reviewer and agent on it, newest first. */
-export function modelDetail(model: string, sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], limits: Limits, now: number): string {
-  const items = [...(byModel(sessionRuns, agents).get(model) ?? [])].sort((a, b) => b.startedAt - a.startedAt)
-  const total = sum(items.map(i => i.tokens))
+/** A group's or a model's details for the pop-out: what it spent, against the group's limit, then each reviewer and agent, newest first. */
+export function usageDetail(catalog: Catalog, items: readonly UsageItem[], limits: Limits, target: { group: string } | { model: string }, now: number): string {
+  const shown = items.filter(i => ('group' in target ? i.group === target.group : i.key === target.model)).sort((a, b) => b.startedAt - a.startedAt)
+  const group = 'group' in target ? target.group : groupOf(catalog, target.model).group.id
+  const spent = items.filter(i => i.group === group).reduce((n, i) => n + i.usd, 0)
+  const name = catalog.groups.find(g => g.id === group)?.name ?? group
   const head = [
-    `${items.length} run${items.length === 1 ? '' : 's'} · ${shortCount(weighted(total))} of ${shortCount(modelLimit(limits, model))} weighted tokens`,
-    `Tokens: ${tokensLine(total)}`,
+    `${shown.length} run${shown.length === 1 ? '' : 's'} · ${usd(shown.reduce((n, i) => n + i.usd, 0))} at API prices`,
+    `${name} group: ${usd(spent)} of ${usd(groupLimit(limits, group))} this session`,
+    `Tokens: ${tokensLine(sum(shown.map(i => i.tokens)))}`,
     '',
   ]
-  const lines = items.flatMap(i => [
-    `${timeOfDay(i.startedAt)} ${i.what}`,
-    `└ ${i.status}, ${clock((i.endedAt ?? now) - i.startedAt)} · ${tokensLine(i.tokens)} · ${shortCount(weighted(i.tokens))} weighted`,
+  const lines = shown.flatMap(i => [
+    `${timeOfDay(i.startedAt)} ${i.what}${'group' in target ? ` · ${modelName(i.key)}` : ''}`,
+    `└ ${i.status}, ${clock((i.endedAt ?? now) - i.startedAt)} · ${tokensLine(i.tokens)} · ${usd(i.usd)}`,
   ])
   return [...head, ...lines].join('\n')
 }
@@ -191,38 +207,36 @@ export function agentDetail(a: ClaudeAgent, prompt: string, now: number): string
   return [...head, prompt].join('\n')
 }
 
-/** The settings' limits with this session's raises and switches. */
-export function limitsOf(base: Settings['limits'], record: SessionRecord): Limits {
-  const named = new Set([...Object.keys(base.models), ...Object.keys(record.raises.models)])
+/** The catalog's group limits with this session's raises and switches. */
+export function limitsOf(catalog: Catalog, fallbackUsd: number, record: SessionRecord): Limits {
   return {
     isOn: !record.isLimitsOff,
-    models: Object.fromEntries([...named].map(m => [m, (base.models[m] ?? base.modelDefault) + (record.raises.models[m] ?? 0)])),
-    modelDefault: base.modelDefault,
+    groups: Object.fromEntries(catalog.groups.map(g => [g.id, (g.limitUsd ?? fallbackUsd) + (record.raises.groups[g.id] ?? 0)])),
+    fallbackUsd,
     closed: record.closed,
   }
 }
 
-/** A Claude agent's limit name; one kept before agents knew their model has none to tell. */
-export const agentModel = (a: ClaudeAgent) => claudeModel(a.model ?? 'unknown')
-
-/** Every model the session's reviewers and agents ran on, with the weighted tokens spent on it, none spent included. */
-export function spentOf(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[]): Spent {
-  return Object.fromEntries([...byModel(sessionRuns, agents)].map(([model, items]) => [model, items.reduce((n, i) => n + weighted(i.tokens), 0)]))
+/** $ at API prices each group's reviewers and agents spent. */
+export function spentOf(items: readonly UsageItem[]): Spent {
+  const spent: Record<string, number> = {}
+  for (const i of items) spent[i.group] = (spent[i.group] ?? 0) + i.usd
+  return spent
 }
 
-/** What a raise from the Limits tab adds: the default limit's size, so one press is one more allowance. */
-export const RAISE_BY = 20_000_000
+/** What one press of a group's raise adds, in $. */
+export const RAISES_USD = [1, 10] as const
 
-export function limitsProps(limits: Limits, spent: Spent): LimitsProps {
-  const named = [...new Set([...Object.keys(spent), ...Object.keys(limits.models)])].sort()
+/** Every group of the catalog: what it spent against its limit, a raise, and over once spent reaches it. */
+export function limitsProps(catalog: Catalog, limits: Limits, spent: Spent): LimitsProps {
   return {
     isOn: limits.isOn,
-    models: named.map(model => {
-      const used = spent[model] ?? 0
-      const limit = modelLimit(limits, model)
-      return { label: model, spent: shortCount(used), limit: shortCount(limit), raise: { model }, raiseLabel: `+${shortCount(RAISE_BY)}`, isOver: used >= limit }
+    groups: catalog.groups.map(g => {
+      const used = spent[g.id] ?? 0
+      const limit = groupLimit(limits, g.id)
+      const raises = RAISES_USD.map(n => ({ label: `+$${n}`, raise: { group: g.id, usd: n } }))
+      return { label: g.name, spent: usd(used), limit: usd(limit), raises, isOver: used >= limit }
     }),
-    modelDefault: shortCount(limits.modelDefault),
     gates: GATES.map(gate => ({ gate, isOpen: !limits.closed.includes(gate) })),
   }
 }
@@ -233,7 +247,7 @@ export type Badge = { count: number; level: SidebarBadgeLevel }
 export function badgeOf(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], limits: LimitsProps): Badge {
   const running = sessionRuns.flatMap(run => run.reviewers).filter(r => r.status === 'running').length
   const live = agents.filter(a => LIVE.includes(a.status)).length
-  const reached = limits.isOn ? limits.models.filter(r => r.isOver).length : 0
+  const reached = limits.isOn ? limits.groups.filter(r => r.isOver).length : 0
   return { count: running + live + reached, level: reached > 0 ? 'attention' : 'info' }
 }
 
@@ -243,23 +257,26 @@ export type ViewInput = {
   rows: number
   now: number
   opened: Target | null
+  catalog: Catalog
+  catalogNote: string | null
   sessionRuns: readonly Run[]
   agents: readonly ClaudeAgent[]
   record: SessionRecord
-  limits: Settings['limits']
+  fallbackUsd: number
 }
 
 export function overviewProps(v: ViewInput): OverviewProps {
   const running = runningProps(v.sessionRuns, v.agents, v.now)
   const log = logProps(v.sessionRuns, v.agents, v.page)
+  const items = itemsOf(v.catalog, v.sessionRuns, v.agents)
   return {
     tab: v.tab,
     counts: { running: running.live.length, log: log.rows.length },
     rows: v.rows,
     opened: v.opened,
     running,
-    usage: usageProps(v.sessionRuns, v.agents, v.record),
+    usage: usageProps(v.catalog, items, v.record, v.catalogNote),
     log,
-    limits: limitsProps(limitsOf(v.limits, v.record), spentOf(v.sessionRuns, v.agents)),
+    limits: limitsProps(v.catalog, limitsOf(v.catalog, v.fallbackUsd, v.record), spentOf(items)),
   }
 }
