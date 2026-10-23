@@ -13,10 +13,19 @@ export type SessionRecord = {
   /** Added to the settings' limits for this session from the Limits tab. */
   raises: Record<Raise, number>
   closed: Gate[]
+  /** The Limits switch turned off for this session; limits are on until then. */
+  isLimitsOff: boolean
 }
 
 export function emptyRecord(): SessionRecord {
-  return { main: { in: 0, cached: 0, out: 0 }, turns: 0, agents: [], raises: { reviewRuns: 0, reviewTokens: 0, agentTokens: 0 }, closed: [] }
+  return {
+    main: { in: 0, cached: 0, out: 0 },
+    turns: 0,
+    agents: [],
+    raises: { reviewRuns: 0, reviewTokens: 0, agentTokens: 0 },
+    closed: [],
+    isLimitsOff: false,
+  }
 }
 
 export const recordPath = (cacheDir: string, sessionId: string) => `${cacheDir}/sessions/${sessionId}.json`

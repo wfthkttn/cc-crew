@@ -9,6 +9,8 @@ export type ClaudeAgent = {
   description: string
   /** The workflow run it belongs to, `wf_...`. */
   workflow?: string
+  /** What it runs on, as its spawn resolved it. */
+  model?: string
   startedAt: number
   /** When its last turn ended. */
   endedAt?: number

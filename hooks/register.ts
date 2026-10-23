@@ -2,14 +2,14 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { SidebarDrawerSlot, SidebarPopoutSlot, SidebarRowComponent } from 'sidebar'
 
 import { ClaudeAgents } from './agents.ts'
-import { wrap } from './brief.ts'
+import { wrap } from './detail.ts'
 import { type ChangeSpec, changeOf } from './changes.ts'
 import * as claude from './claude.ts'
 import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
 import { agentRefusal, followUpRefusal, GATES, type Gate, reviewRefusal } from './limits.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
-import type { BriefProps, Raise, Tab } from './overview-props.ts'
+import type { DetailProps, Raise, Tab, Target } from './overview-props.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
@@ -31,7 +31,7 @@ import {
 import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens } from './usage.ts'
-import { RAISE_BY, limitsOf, overviewProps, spentOf } from './views.ts'
+import { RAISE_BY, agentDetail, limitsOf, overviewProps, runDetail, spentOf } from './views.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -112,7 +112,7 @@ const TAB_ID = 'crew'
 const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
 const POPOUT_SLOT: SidebarPopoutSlot = `sidebar-popout:${TAB_ID}`
 const OVERVIEW_KEY = 'crew-overview'
-const BRIEF_KEY = 'crew-brief'
+const DETAIL_KEY = 'crew-detail'
 /** The sidebar's drawer frame: a border and a padding column on each side. */
 const DRAWER_FRAME_COLUMNS = 4
 const ROW_COMPONENTS = [
@@ -132,8 +132,8 @@ const TICK_MS = 1000
 
 let sessionId = ''
 const claudeAgents = new ClaudeAgents()
-/** The brief shown in the pop-out, read from the run's report folder. */
-let brief: { run: string; title: string; text: string; path: string } | null = null
+/** The run or agent the pop-out shows, with its brief or prompt as read from `path` when it was opened. */
+let detail: { target: Target; text: string; path: string } | null = null
 let ticker: { cancel(): void } | null = null
 let record: SessionRecord = emptyRecord()
 let view: { tab: Tab; page: number } = { tab: 'running', page: 0 }
@@ -160,13 +160,46 @@ async function loadSessionRuns($: EngineInterface): Promise<void> {
   }
 }
 
-/** The brief's lines as the pop-out's room allows, the last saying where the rest is when it does not fit. */
-export function briefProps(shown: NonNullable<typeof brief>, rows: number): BriefProps {
-  const lines = wrap(shown.text, OVERVIEW_COLUMNS)
+const promptPath = (agentId: string) => `${cacheDir}/sessions/${sessionId}/prompts/${agentId}.md`
+
+/** Text as the pop-out's room allows, the last line saying where the rest is when it does not fit. */
+export function detailProps(title: string, text: string, path: string, rows: number): DetailProps {
+  const lines = wrap(text, OVERVIEW_COLUMNS)
   const room = Math.max(1, rows - 1)
-  if (lines.length <= room) return { title: shown.title, lines }
+  if (lines.length <= room) return { title, lines }
   const kept = lines.slice(0, room - 1)
-  return { title: shown.title, lines: [...kept, `… ${lines.length - kept.length} more lines in ${shown.path}`] }
+  return { title, lines: [...kept, `… ${lines.length - kept.length} more lines in ${path}`] }
+}
+
+/** The pop-out's title and text for what it shows, from the run's or agent's state now; null once it is gone. */
+function shownDetail(shown: NonNullable<typeof detail>, now: number): { title: string; text: string } | null {
+  if ('run' in shown.target) {
+    const run = runs.get(shown.target.run)
+    return run === undefined ? null : { title: `review: ${run.description}`, text: runDetail(run, shown.text) }
+  }
+  const id = shown.target.agent
+  const agent = claudeAgents.all().find(a => a.id === id)
+  return agent === undefined ? null : { title: `${agent.type}: ${agent.description}`, text: agentDetail(agent, shown.text, now) }
+}
+
+/** Opens the run's or agent's details in the pop-out, or closes them when they are what it shows. */
+async function open($: EngineInterface, target: Target): Promise<void> {
+  if (detail !== null && JSON.stringify(detail.target) === JSON.stringify(target)) {
+    detail = null
+    await $.sidebar.popout({ id: TAB_ID, isShown: false })
+    return
+  }
+  let path: string
+  if ('run' in target) {
+    const run = runs.get(target.run)
+    if (run === undefined) throw new Error(`crew: no run ${target.run} in this session to open`)
+    path = `${run.reportDir}/brief.md`
+  } else {
+    path = promptPath(target.agent)
+  }
+  const text = (await $.fs.exists(path)) ? await $.fs.read(path) : `(not kept: ${path} does not exist; the agent started before crew kept prompts)`
+  detail = { target, text, path }
+  await $.sidebar.popout({ id: TAB_ID, isShown: true })
 }
 
 async function tick($: EngineInterface): Promise<void> {
@@ -421,16 +454,30 @@ export const register: Register = (on, options) => {
         id: spawned.agentId,
         type: e.subagentType,
         description: e.description,
+        model: spawned.model,
         ...(e.workflow === undefined ? {} : { workflow: e.workflow.runId }),
         startedAt: await $.clock.now(),
       })
+      await $.fs.write(promptPath(spawned.agentId), e.prompt)
       await keep($)
     }
     return spawned
   })
 
   on('ui.message', { element: OVERVIEW_KEY }, async ($, e, next) => {
-    const data = e.data as { tab?: unknown; page?: unknown; raise?: unknown; toggle?: unknown; stop?: { run?: unknown; key?: unknown }; brief?: unknown }
+    const data = e.data as {
+      tab?: unknown
+      page?: unknown
+      raise?: unknown
+      toggle?: unknown
+      switchLimits?: unknown
+      stop?: { run?: unknown; key?: unknown }
+      open?: { run?: unknown; agent?: unknown }
+    }
+    if (data.switchLimits === true) {
+      record.isLimitsOff = !record.isLimitsOff
+      await keep($)
+    }
     if (data.tab === 'running' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
     if (data.raise === 'reviewRuns' || data.raise === 'reviewTokens' || data.raise === 'agentTokens') {
@@ -449,25 +496,17 @@ export const register: Register = (on, options) => {
         if (r.status === 'running' && (key === undefined || key === r.key)) stopReviewer(data.stop.run, r.key)
       }
     }
-    if (typeof data.brief === 'string') {
-      const run = runs.get(data.brief)
-      if (brief?.run === data.brief || run === undefined) {
-        brief = null
-        await $.sidebar.popout({ id: TAB_ID, isShown: false })
-      } else {
-        const path = `${run.reportDir}/brief.md`
-        brief = { run: run.id, title: run.description, text: await $.fs.read(path), path }
-        await $.sidebar.popout({ id: TAB_ID, isShown: true })
-      }
-    }
+    if (typeof data.open?.run === 'string') await open($, { run: data.open.run })
+    if (typeof data.open?.agent === 'string') await open($, { agent: data.open.agent })
     $.ui.invalidate('ui.render')
     return next(e)
   })
 
-  on('ui.message', { element: BRIEF_KEY }, async ($, e, next) => {
+  on('ui.message', { element: DETAIL_KEY }, async ($, e, next) => {
     if ((e.data as { close?: unknown }).close === true) {
-      brief = null
+      detail = null
       await $.sidebar.popout({ id: TAB_ID, isShown: false })
+      $.ui.invalidate('ui.render')
     }
     return next(e)
   })
@@ -476,19 +515,21 @@ export const register: Register = (on, options) => {
     const tree = await next(e)
     if (e.surface !== 'terminal') return tree
     const isDrawer = hasSlot(tree, DRAWER_SLOT)
-    const shown = brief !== null && hasSlot(tree, POPOUT_SLOT) ? brief : null
+    const shown = detail !== null && hasSlot(tree, POPOUT_SLOT) ? detail : null
     if (!isDrawer && shown === null) return tree
     const room = await $.sidebar.room({})
     if (room === null) return tree
     const { Client } = $.ui.resolve(e)
+    const now = await $.clock.now()
     let filled: unknown = tree
     if (isDrawer) {
-      const usd = view.tab === 'log' ? ((await $.session.usage()).cost?.usd ?? null) : null
+      const usd = view.tab === 'running' ? ((await $.session.usage()).cost?.usd ?? null) : null
       const props = overviewProps({
         ...view,
         rows: room.drawer,
-        now: await $.clock.now(),
+        now,
         usd,
+        opened: detail?.target ?? null,
         sessionRuns: sessionRuns(),
         agents: claudeAgents.all(),
         record,
@@ -497,9 +538,10 @@ export const register: Register = (on, options) => {
       const height = Math.min(room.drawer, overviewLines(props).length)
       filled = fillSlot(filled, DRAWER_SLOT, () => Client({ key: OVERVIEW_KEY, module: './overview.ts', props, width: OVERVIEW_COLUMNS, height }))
     }
-    if (shown !== null) {
-      const props = briefProps(shown, room.popout)
-      filled = fillSlot(filled, POPOUT_SLOT, () => Client({ key: BRIEF_KEY, module: './brief.ts', props, width: OVERVIEW_COLUMNS, height: props.lines.length + 1 }))
+    const shownNow = shown === null ? null : shownDetail(shown, now)
+    if (shown !== null && shownNow !== null) {
+      const props = detailProps(shownNow.title, shownNow.text, shown.path, room.popout)
+      filled = fillSlot(filled, POPOUT_SLOT, () => Client({ key: DETAIL_KEY, module: './detail.ts', props, width: OVERVIEW_COLUMNS, height: props.lines.length + 1 }))
     }
     return filled as typeof tree
   })

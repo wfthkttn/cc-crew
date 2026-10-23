@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-import type { BriefProps } from './overview-props'
+import type { DetailProps } from './overview-props'
 import { OVERVIEW_COLUMNS } from './overview'
 
 const TEXT = '#e8ecf4'
@@ -46,7 +46,7 @@ export function isCloseAt(x: number, y: number): boolean {
 
 type State = { isHovered: boolean }
 
-const Brief: ClientModule<BriefProps, State> = (props, surface) => {
+const Detail: ClientModule<DetailProps, State> = (props, surface) => {
   const { Box, Text } = surface.elements
   if (surface.state === undefined) {
     surface.onPointer(p => {
@@ -74,4 +74,4 @@ const Brief: ClientModule<BriefProps, State> = (props, surface) => {
   })
 }
 
-export default Brief
+export default Detail

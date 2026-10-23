@@ -84,14 +84,14 @@
     "limit_review_tokens": {
       "type": "number",
       "title": "Review tokens per session",
-      "description": "Fresh tokens (input not read from a cache, plus output) one session's reviewers may spend",
+      "description": "Tokens (new input plus output; cache reads not counted) one session's reviewers may spend",
       "default": 10000000,
       "min": 0
     },
     "limit_agent_tokens": {
       "type": "number",
       "title": "Claude agent tokens per session",
-      "description": "Fresh tokens one session's own subagents and workflow agents may spend; past it new ones are refused",
+      "description": "Tokens (new input plus output) one session's own subagents and workflow agents may spend; past it new ones are refused",
       "default": 20000000,
       "min": 0
     }

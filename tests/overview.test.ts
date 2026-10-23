@@ -1,14 +1,14 @@
 import { expect, test } from 'claude-code/testing'
 
 import { type ClaudeAgent, ClaudeAgents } from '../hooks/agents.ts'
-import { wrap } from '../hooks/brief.ts'
+import { wrap } from '../hooks/detail.ts'
 import { agentRefusal, followUpRefusal, fresh, reviewRefusal } from '../hooks/limits.ts'
 import { OVERVIEW_COLUMNS, actionAt, logPageSize, overviewLines } from '../hooks/overview.ts'
 import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { emptyRecord } from '../hooks/record.ts'
 import type { Run } from '../hooks/runs.ts'
 import { shortCount, tokensOf } from '../hooks/usage.ts'
-import { limitsOf, overviewProps, spentOf } from '../hooks/views.ts'
+import { agentDetail, limitsOf, overviewProps, runDetail, spentOf } from '../hooks/views.ts'
 
 // Trimmed from live reports, 2026-10-23.
 test("each provider's usage reads as tokens in (cache included) and out", () => {
@@ -66,13 +66,14 @@ const AGENTS: ClaudeAgent[] = [
   { id: 'a2', type: 'general-purpose', description: 'review:bugs', workflow: 'wf_1', startedAt: AT + 30_000, endedAt: AT + 90_000, status: 'completed', tokens: { in: 50_000, cached: 40_000, out: 2_000 } },
 ]
 
-function props(tab: Tab, rows = 40, page = 0): OverviewProps {
+function props(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = null): OverviewProps {
   return overviewProps({
     tab,
     page,
     rows,
     now: AT + 252_000,
     usd: 12.4,
+    opened,
     sessionRuns: [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])],
     agents: AGENTS,
     record: { ...emptyRecord(), turns: 7, main: { in: 1_200_000, cached: 1_000_000, out: 30_000 } },
@@ -82,62 +83,86 @@ function props(tab: Tab, rows = 40, page = 0): OverviewProps {
 
 const text = (p: OverviewProps) => overviewLines(p).map(line => line.map(s => s.text).join(''))
 
-test('every view fits the drawer, under a tab row that counts what runs and what is logged', () => {
+test('every view fits the drawer, under a tab row that counts what runs and what is logged, Log last', () => {
   for (const tab of ['running', 'log', 'limits'] as const) {
     const lines = text(props(tab))
     expect(lines.map(l => [...l].length)).toEqual(lines.map(() => OVERVIEW_COLUMNS))
-    expect(lines[0]).toStartWith(' Running 2 │ Log 2 │ Limits ')
+    expect(lines[0]).toStartWith(' Running 2 │ Limits │ Log 2 ')
   }
 })
 
-test('Running: the live run with its reviewers and buttons, then the live Claude agent', () => {
-  const lines = text(props('running'))
-  expect(lines[2]).toStartWith('Crew reviews')
-  expect(lines[3]).toContain('review r1')
-  expect(lines[3]).toContain('▐⧉ Brief▌ ▐■ Stop▌')
-  expect(lines[4]).toContain('medium')
-  expect(lines[4]).toContain('▐■ Stop▌')
-  expect(lines[5]).toContain('opus · medium')
-  expect(lines[5]).toContain('900 in · 40 out')
-  expect(lines[6]).toStartWith('Claude agents')
-  expect(lines[7]).toContain('find the parser')
-  expect(lines.some(l => l.includes('review r0'))).toBe(false)
-})
-
-test('Log: the session totals, then finished runs and agents newest first', () => {
-  const lines = text(props('log'))
+test("Running: the session's spend as a table, then the live run with its buttons, then the live Claude agent", () => {
+  const p = props('running')
+  const lines = text(p)
   expect(lines[2]).toStartWith('This session · Claude $12.40 so far')
-  expect(lines[3]).toContain('7 turns · 1.2M in · 30k out')
-  expect(lines[4]).toContain('2 runs')
-  expect(lines[5]).toContain('codex 900 · claude 2k in')
-  expect(lines[7]).toContain('20:07 workflow')
-  expect(lines[8]).toContain('20:07 review r0')
-  expect(lines[8]).toContain('1 ok · 1 stopped')
-  expect(lines[9]).toContain('900 in · 40 out · 1 finding')
+  expect(lines[3]).toMatch(/count +new +cached +out/)
+  expect(lines[5]).toMatch(/^Claude +7 turns +200k +1\.0M +30k/)
+  expect(lines[6]).toMatch(/^Reviews +2 runs +900 +2k +120/)
+  expect(lines[7]).toMatch(/^ {2}codex +300 +600 +40/)
+  expect(lines[9]).toMatch(/^Agents +2 +10k +40k +2k/)
+  expect(lines[11]).toStartWith('Crew reviews')
+  expect(lines[12]).toContain('review r1')
+  expect(lines[12]).toContain('▐⧉ Details▌ ▐■ Stop▌')
+  expect(lines[13]).toContain('▐■ Stop▌')
+  expect(lines[14]).toContain('300 new · 40 out')
+  expect(lines[15]).toStartWith('Claude agents')
+  expect(lines[16]).toContain('find the parser')
+  expect(actionAt(p, lines[12]!.indexOf('Details'), 12)).toEqual({ open: { run: 'r1' } })
+  expect(actionAt(p, 5, 16)).toEqual({ open: { agent: 'a1' } })
 })
 
-test('Log pages when it runs past the drawer, with buttons to page', () => {
+test('Log: one row per finished run or agent, newest first; a press on a row opens it', () => {
+  const p = props('log')
+  const lines = text(p)
+  expect(lines[2]).toMatch(/^time +what +status +took +new +out/)
+  expect(lines[4]).toMatch(/^20:07 workflow: review:bugs +completed +1:00 +10k +2k/)
+  expect(lines[5]).toMatch(/^20:07 review: review r0 +1 ok · 1 stop +1:18 +600 +80/)
+  expect(lines).toHaveLength(6)
+  expect(actionAt(p, 0, 4)).toEqual({ open: { agent: 'a2' } })
+  expect(actionAt(p, 40, 5)).toEqual({ open: { run: 'r0' } })
+  expect(overviewLines(props('log', 40, 0, { run: 'r0' }))[5]![0]!.bold).toBe(true)
+})
+
+test('Log pages when it runs past the drawer, its header on every page', () => {
   const rows = 6
   const first = props('log', rows)
   const lines = text(first)
-  expect(lines.length).toBe(2 + logPageSize(rows) + 1)
+  expect(logPageSize(rows)).toBe(1)
+  expect(lines).toHaveLength(2 + 2 + 1 + 1)
   expect(lines.at(-1)).toContain('▐▼ Older▌')
-  expect(lines.at(-1)).toContain('page 1 of 3')
-  expect(actionAt(first, lines.at(-1)!.indexOf('▼') , lines.length - 1)).toEqual({ page: 1 })
-  expect(text(props('log', rows, 9)).at(-1)).toContain('page 3 of 3')
+  expect(lines.at(-1)).toContain('page 1 of 2')
+  expect(actionAt(first, lines.at(-1)!.indexOf('▼'), lines.length - 1)).toEqual({ page: 1 })
+  const last = text(props('log', rows, 9))
+  expect(last[2]).toMatch(/^time/)
+  expect(last.at(-1)).toContain('page 2 of 2')
 })
 
-test('Limits: spend against each limit with a raise button, and a switch per gate', () => {
+test('Limits: an on switch, spend against each limit with a raise button, and a switch per gate', () => {
   const p = props('limits')
   const lines = text(p)
-  expect(lines[2]).toContain('2 / 20 runs')
-  expect(lines[2]).toContain('▐+10 runs▌')
-  expect(lines[4]).toContain('12k / 20M fresh tokens')
-  expect(lines[6]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● agents▌')
-  expect(actionAt(p, lines[2]!.indexOf('+10'), 2)).toEqual({ raise: 'reviewRuns' })
-  expect(actionAt(p, lines[6]!.indexOf('agents'), 6)).toEqual({ toggle: 'agents' })
+  expect(lines[2]).toContain('▐● on▌')
+  expect(actionAt(p, lines[2]!.indexOf('on'), 2)).toEqual({ switchLimits: true })
+  expect(lines[4]).toContain('2 / 20 runs')
+  expect(lines[4]).toContain('▐+10 runs▌')
+  expect(lines[6]).toContain('12k / 20M tokens')
+  expect(lines[8]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● agents▌')
+  expect(actionAt(p, lines[4]!.indexOf('+10'), 4)).toEqual({ raise: 'reviewRuns' })
+  expect(actionAt(p, lines[8]!.indexOf('agents'), 8)).toEqual({ toggle: 'agents' })
   expect(actionAt(p, 1, 0)).toEqual({ tab: 'running' })
   expect(actionAt(p, lines[0]!.indexOf('Log'), 0)).toEqual({ tab: 'log' })
+})
+
+test("a run's and an agent's details: when, how it went, what it spent, then the brief or the prompt", () => {
+  const r = run('r0', ['ok', 'stopped'])
+  const text = runDetail(r, 'Review the parser.')
+  expect(text).toContain('Started 20:07 · took 1:18 · 1 ok · 1 stop')
+  expect(text).toContain('codex (medium): ok, 1:18 · 300 new · 600 cached · 40 out · 1 finding')
+  expect(text).toMatch(/── Brief ──\nReview the parser\.$/)
+  const agent = agentDetail({ ...AGENTS[1]!, model: 'claude-opus-5-5' }, 'Find bugs.', AT)
+  expect(agent).toContain('general-purpose on claude-opus-5-5 · completed')
+  expect(agent).toContain('Tokens: 10k new · 40k cached · 2k out')
+  expect(agent).toContain('Workflow run wf_1')
+  expect(agent).toMatch(/── Prompt ──\nFind bugs\.$/)
 })
 
 test('a review is refused when its provider is off or the session is past a limit; raises lift it', () => {
@@ -150,7 +175,7 @@ test('a review is refused when its provider is off or the session is past a limi
   expect(reviewRefusal(limitsOf(base, raised), spent, ['codex'])).toBe(undefined)
   expect(reviewRefusal(limitsOf(base, { ...raised, closed: ['antigravity'] }), spent, ['codex', 'antigravity'])).toContain('antigravity reviewers are switched off')
   expect(followUpRefusal(limitsOf(base, emptyRecord()), spent, 'codex')).toBe(undefined)
-  expect(agentRefusal(limitsOf(base, emptyRecord()), spent)).toContain("this session's agents spent 12000 fresh tokens, the limit is 10000")
+  expect(agentRefusal(limitsOf(base, emptyRecord()), spent)).toContain("this session's agents spent 12000 tokens (new input + output), the limit is 10000")
   expect(agentRefusal(limitsOf(base, raised), spent)).toBe(undefined)
   expect(agentRefusal(limitsOf(base, { ...raised, closed: ['agents'] }), spent)).toContain('switched off')
 })

@@ -1,17 +1,21 @@
 import type { Gate } from './limits'
 
-export type Tab = 'running' | 'log' | 'limits'
+export type Tab = 'running' | 'limits' | 'log'
 
 export type Raise = 'reviewRuns' | 'reviewTokens' | 'agentTokens'
+
+/** A run or an agent whose details the pop-out shows. */
+export type Target = { run: string } | { agent: string }
 
 /** What a press on the overview asks for. */
 export type OverviewAction =
   | { tab: Tab }
   | { stop: { run: string; key?: string } }
-  | { brief: string }
+  | { open: Target }
   | { page: 1 | -1 }
   | { raise: Raise }
   | { toggle: Gate }
+  | { switchLimits: true }
 
 export type ReviewerRow = {
   key: string
@@ -21,7 +25,7 @@ export type ReviewerRow = {
   status: string
   elapsed: string
   isRunning: boolean
-  /** `212k in · 9k out` once it reported usage. */
+  /** `109k new · 4k out` once it reported usage. */
   tokens: string | null
 }
 
@@ -29,18 +33,30 @@ export type RunRow = { id: string; description: string; elapsed: string; reviewe
 
 export type AgentRow = { id: string; type: string; description: string; status: string; elapsed: string; tokens: string | null }
 
-export type RunningProps = { runs: RunRow[]; agents: AgentRow[] }
+/** Token counts as a table's columns show them, `109k`; empty where nothing was reported. */
+export type TokenCells = { new: string; cached: string; out: string }
 
-/** One finished run or agent in the log, newest first; `time` is when it started, `13:07`. */
-export type LogEntry =
-  | { kind: 'run'; time: string; description: string; elapsed: string; tally: string; reviewers: (ReviewerRow & { findings: string })[] }
-  | { kind: 'agent'; time: string; type: string; description: string; status: string; elapsed: string; tokens: string | null }
+/** A row of the session's totals; `isPart` rows break the one above down. */
+export type TotalRow = TokenCells & { label: string; count: string; isPart: boolean }
 
-export type LogProps = { totals: string[]; entries: LogEntry[]; page: number }
+/** The first tab: what the session spent, then what runs now. */
+export type RunningProps = {
+  /** The session's /cost at API prices, agents included; null where the host keeps none. */
+  usd: number | null
+  totals: TotalRow[]
+  runs: RunRow[]
+  agents: AgentRow[]
+}
+
+/** One finished run or agent, newest first; a press opens its details. */
+export type LogRow = TokenCells & { time: string; what: string; status: string; took: string; open: Target }
+
+export type LogProps = { rows: LogRow[]; page: number }
 
 export type LimitRow = { label: string; spent: string; limit: string; raise: Raise; raiseLabel: string }
 
-export type LimitsProps = { rows: LimitRow[]; gates: { gate: Gate; isOpen: boolean }[] }
+/** `isOn` false: the limits below are shown but not enforced; the gates still are. */
+export type LimitsProps = { isOn: boolean; rows: LimitRow[]; gates: { gate: Gate; isOpen: boolean }[] }
 
 export type OverviewProps = {
   tab: Tab
@@ -48,9 +64,11 @@ export type OverviewProps = {
   counts: { running: number; log: number }
   /** The rows the drawer has for the view, the tab row included. */
   rows: number
+  /** The run or agent the pop-out shows, so its line reads as open. */
+  opened: Target | null
   running: RunningProps
   log: LogProps
   limits: LimitsProps
 }
 
-export type BriefProps = { title: string; lines: string[] }
+export type DetailProps = { title: string; lines: string[] }
