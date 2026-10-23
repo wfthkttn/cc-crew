@@ -124,11 +124,15 @@ export function fencedCommand(fence: Fence, command: string): string | undefined
   return `cd ${shq(root)} && ${args.map(shq).join(' ')}`
 }
 
-/** A reviewer turn under way; `wait` resolves with how it ended and lifts its fence. */
-export type Pending = { wait: () => Promise<Outcome> }
+/**
+ * A reviewer turn under way; `wait` resolves with how it ended and lifts its fence. `stop` ends the wait as
+ * stopped: with the fence lifted, every Read and Bash the reviewer still tries is refused.
+ */
+export type Pending = { wait: () => Promise<Outcome>; stop: () => void }
 
 const failed = (model: string, detail: string, continueId?: string): Pending => ({
   wait: async () => ({ status: 'failed', text: '', model, detail, ...(continueId !== undefined ? { continueId } : {}) }),
+  stop: () => {},
 })
 
 function arm(io: Io, agentId: string, model: string, fence: Fence, j: Pick<Job, 'dir' | 'timeoutMs'>): Pending & { drop: () => void } {
@@ -154,6 +158,7 @@ function arm(io: Io, agentId: string, model: string, fence: Fence, j: Pick<Job, 
   }
   return {
     drop,
+    stop: () => stop({ status: 'stopped', text: '', model, continueId: agentId, detail: 'stopped from the crew tab' }),
     wait: async () => {
       try {
         const outcome = await Promise.race([answered, stopped])

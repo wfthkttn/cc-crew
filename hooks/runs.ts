@@ -6,6 +6,7 @@ import * as codex from './codex.ts'
 import type { Provider, Settings } from './config.ts'
 import type { FollowUp, Job, Outcome, Preflight, Status } from './job.ts'
 import { renderFindings } from './prompt.ts'
+import { type Tokens, tokensOf } from './usage.ts'
 
 export type ReviewerSpec = { provider: Provider; model?: string; effort?: string }
 
@@ -20,6 +21,8 @@ export type ReviewerState = ReviewerSpec & {
   dir: string
   report?: string
   findings?: number
+  /** What its last turn spent, as its provider reported it. */
+  tokens?: Tokens
   startedAt: number
   endedAt?: number
 }
@@ -41,9 +44,37 @@ export type Run = {
   changes?: string
   reviewers: ReviewerState[]
   courier?: string
+  /** The session that started it; absent in runs from before runs knew theirs. */
+  sessionId?: string
 }
 
 export const runs = new Map<string, Run>()
+
+/** How to stop each reviewer still running in this load, by `<run id>/<key>`. */
+const stops = new Map<string, () => void>()
+
+const stopKey = (run: Run, r: ReviewerState) => `${run.id}/${r.key}`
+
+/** A signal that fires on `outer` or on the reviewer's stop, which this registers until `disarm`. */
+function arming(run: Run, r: ReviewerState, outer?: AbortSignal): AbortSignal {
+  const controller = new AbortController()
+  if (outer?.aborted) controller.abort()
+  outer?.addEventListener('abort', () => controller.abort())
+  stops.set(stopKey(run, r), () => controller.abort())
+  return controller.signal
+}
+
+function disarm(run: Run, r: ReviewerState): void {
+  stops.delete(stopKey(run, r))
+}
+
+/** Stops a running reviewer: a Codex or Antigravity child is killed, a Claude reviewer's calls are refused from then on. */
+export function stopReviewer(runId: string, key: string): boolean {
+  const stop = stops.get(`${runId}/${key}`)
+  if (stop === undefined) return false
+  stop()
+  return true
+}
 
 export function slugOf(text: string): string {
   const slug = text
@@ -147,6 +178,8 @@ function apply(r: ReviewerState, o: Outcome, endedAt: number): void {
   if (o.detail !== undefined) r.detail = o.detail
   if (o.continueId !== undefined) r.continueId = o.continueId
   if (o.findings !== undefined) r.findings = o.findings.findings.length
+  const tokens = tokensOf(r.provider, o.usage)
+  if (tokens !== undefined) r.tokens = tokens
 }
 
 /** Tells the person a provider needs them; answers why the message failed, or undefined. */
@@ -168,10 +201,12 @@ export async function beginClaude(
     if (r.provider !== 'claude') continue
     const j = job(run, r, system, task, s)
     try {
-      begun.set(r.key, await claude.begin(io, j, s.codexBin, `crew review: ${run.description}`))
+      const pending = await claude.begin(io, j, s.codexBin, `crew review: ${run.description}`)
+      stops.set(stopKey(run, r), pending.stop)
+      begun.set(r.key, pending)
     } catch (err) {
       const detail = `the reviewer agent did not start: ${String(err)}`
-      begun.set(r.key, { wait: async () => ({ status: 'failed', text: '', model: r.model ?? claude.DEFAULT_MODEL, detail }) })
+      begun.set(r.key, { wait: async () => ({ status: 'failed', text: '', model: r.model ?? claude.DEFAULT_MODEL, detail }), stop: () => {} })
     }
   }
   return begun
@@ -190,11 +225,12 @@ async function runOne(
   signal?: AbortSignal,
 ): Promise<void> {
   let o: Outcome
+  const stopped = r.provider === 'claude' ? signal : arming(run, r, signal)
   const pre = await preflight(io, s, r.provider, cacheDir)
   if (!pre.ok) {
     o = { status: pre.status, text: '', model: r.model ?? 'default', detail: pre.detail }
   } else {
-    const j = job(run, r, system, task, s, signal)
+    const j = job(run, r, system, task, s, stopped)
     try {
       switch (r.provider) {
         case 'codex':
@@ -217,6 +253,7 @@ async function runOne(
       o = { status: 'failed', text: '', model: r.model ?? 'default', detail: String(err) }
     }
   }
+  disarm(run, r)
   apply(r, o, await io.now())
   r.report = await report(io, run, r, o, r.key)
   if (o.status === 'signed_out' || o.status === 'quota') {
@@ -266,8 +303,10 @@ export async function ask(
   r.status = 'running'
   r.startedAt = await io.now()
   await save(io, run)
-  if (r.provider !== 'claude') return { f, n }
-  return { f, n, pending: await claude.beginFollowUp(io, f, s.codexBin) }
+  if (r.provider !== 'claude') return { f: { ...f, signal: arming(run, r, signal) }, n }
+  const pending = await claude.beginFollowUp(io, f, s.codexBin)
+  stops.set(stopKey(run, r), pending.stop)
+  return { f, n, pending }
 }
 
 export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Settings, asked: Asked, alert: Alert): Promise<void> {
@@ -293,6 +332,7 @@ export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Setting
   } catch (err) {
     o = { status: 'failed', text: '', model: r.usedModel ?? 'default', detail: String(err) }
   }
+  disarm(run, r)
   apply(r, o, await io.now())
   r.report = await report(io, run, r, o, `${r.key}-followup-${n}`, message)
   if (o.status === 'signed_out' || o.status === 'quota') {

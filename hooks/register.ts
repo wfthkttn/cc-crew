@@ -1,13 +1,35 @@
 import type { EngineInterface, Register } from 'claude-code'
+import type { SidebarDrawerSlot, SidebarPopoutSlot, SidebarRowComponent } from 'sidebar'
 
+import { ClaudeAgents, LIVE } from './agents.ts'
+import { wrap } from './brief.ts'
 import { type ChangeSpec, changeOf } from './changes.ts'
 import * as claude from './claude.ts'
 import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
+import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
+import type { BriefProps, OverviewProps } from './overview-props.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
-import { type Alert, type ReviewerSpec, type Run, ask, beginClaude, continueOne, execute, keysFor, load, runs, slugOf, summary } from './runs.ts'
+import {
+  type Alert,
+  type ReviewerSpec,
+  type ReviewerState,
+  type Run,
+  ask,
+  beginClaude,
+  continueOne,
+  execute,
+  keysFor,
+  load,
+  runs,
+  slugOf,
+  stopReviewer,
+  summary,
+} from './runs.ts'
 import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
+import { fillSlot, hasSlot } from './slot.ts'
+import { type Tokens, claudeTokens, shortCount } from './usage.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -83,6 +105,93 @@ let settings: Settings
 let system = REVIEWER_PROMPT
 let cacheDir = ''
 const approvedDir = () => `${cacheDir}/approved`
+
+const TAB_ID = 'crew'
+const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
+const POPOUT_SLOT: SidebarPopoutSlot = `sidebar-popout:${TAB_ID}`
+const OVERVIEW_KEY = 'crew-overview'
+const BRIEF_KEY = 'crew-brief'
+/** The sidebar's drawer frame: a border and a padding column on each side. */
+const DRAWER_FRAME_COLUMNS = 4
+const ROW_COMPONENTS = [
+  'UserMessage',
+  'AssistantMessage',
+  'ToolUse',
+  'ToolResult',
+  'ToolGroup',
+  'CommandOutput',
+  'TurnDuration',
+  'InfoNotice',
+] as const satisfies readonly SidebarRowComponent[]
+/** After the vault's and quota's tabs. */
+const TOOL = { id: TAB_ID, icon: '◈', short: 'crew', drawerColumns: OVERVIEW_COLUMNS + DRAWER_FRAME_COLUMNS, order: 2 }
+/** How often the open drawer redraws, for its clocks. */
+const TICK_MS = 1000
+
+let sessionId = ''
+const claudeAgents = new ClaudeAgents()
+/** The brief shown in the pop-out, read from the run's report folder. */
+let brief: { run: string; title: string; text: string; path: string } | null = null
+let ticker: { cancel(): void } | null = null
+
+function clock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+const tokensText = (t: Tokens | undefined) => (t === undefined ? null : `${shortCount(t.in)} in · ${shortCount(t.out)} out`)
+
+function pickText(r: ReviewerState): string {
+  const model = r.usedModel ?? r.model
+  return [model === 'default' ? undefined : model, r.effort].filter(x => x !== undefined).join(' · ')
+}
+
+/** This session's runs with a reviewer still running, and Claude's agents still going. */
+export function overviewProps(now: number): OverviewProps {
+  const live = [...runs.values()].filter(run => run.sessionId === sessionId && run.reviewers.some(r => r.status === 'running'))
+  return {
+    runs: live.map(run => ({
+      id: run.id,
+      description: run.description,
+      elapsed: clock(now - run.createdAt),
+      reviewers: run.reviewers.map(r => ({
+        key: r.key,
+        provider: r.provider,
+        pick: pickText(r),
+        status: r.status,
+        elapsed: clock((r.endedAt ?? now) - r.startedAt),
+        isRunning: r.status === 'running',
+        tokens: tokensText(r.tokens),
+      })),
+    })),
+    agents: claudeAgents
+      .all()
+      .filter(a => LIVE.includes(a.status))
+      .map(a => ({
+        id: a.id,
+        type: a.workflow === undefined ? a.type : 'workflow',
+        description: a.description,
+        status: a.status,
+        elapsed: clock(now - a.startedAt),
+        tokens: tokensText(a.tokens),
+      })),
+  }
+}
+
+/** The brief's lines as the pop-out's room allows, the last saying where the rest is when it does not fit. */
+export function briefProps(shown: NonNullable<typeof brief>, rows: number): BriefProps {
+  const lines = wrap(shown.text, OVERVIEW_COLUMNS)
+  const room = Math.max(1, rows - 1)
+  if (lines.length <= room) return { title: shown.title, lines }
+  const kept = lines.slice(0, room - 1)
+  return { title: shown.title, lines: [...kept, `… ${lines.length - kept.length} more lines in ${shown.path}`] }
+}
+
+async function tick($: EngineInterface): Promise<void> {
+  if ((await $.sidebar.selected({})) !== TAB_ID) return
+  claudeAgents.refresh(await $.agent.list())
+  $.ui.invalidate('ui.render')
+}
 
 const alert: Alert = async (io, provider, detail) => {
   try {
@@ -214,6 +323,7 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
     helpers,
     ...(change !== undefined ? { changes: change.label } : {}),
     reviewers: specs.map((s, i) => ({ ...s, key: keys[i]!, status: 'running', dir: `${runDir}/${keys[i]!}`, startedAt: now })),
+    sessionId,
   }
   const task = taskText({ brief, roots, web, ...(change !== undefined ? { changes: change } : {}) })
   await $.fs.write(`${run.reportDir}/brief.md`, task)
@@ -304,7 +414,79 @@ export const register: Register = (on, options) => {
       description: "This session's crew review runs and the Antigravity quota.",
       inputSchema: STATUS_SCHEMA,
     })
+    sessionId = await $.session.id()
+    await $.sidebar.register(TOOL)
+    ticker?.cancel()
+    ticker = $.clock.every(TICK_MS, () => void tick($))
     return started
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const spawned = await next(e)
+    // crew's own reviewers show under their run.
+    if (spawned.deny === undefined && spawned.agentId !== undefined && !e.subagentType.startsWith('crew:')) {
+      claudeAgents.started({
+        id: spawned.agentId,
+        type: e.subagentType,
+        description: e.description,
+        ...(e.workflow === undefined ? {} : { workflow: e.workflow.runId }),
+        startedAt: await $.clock.now(),
+      })
+    }
+    return spawned
+  })
+
+  on('ui.message', { element: OVERVIEW_KEY }, async ($, e, next) => {
+    const data = e.data as { stop?: { run?: unknown; key?: unknown }; brief?: unknown }
+    if (typeof data.stop?.run === 'string') {
+      const key = typeof data.stop.key === 'string' ? data.stop.key : undefined
+      for (const r of runs.get(data.stop.run)?.reviewers ?? []) {
+        if (r.status === 'running' && (key === undefined || key === r.key)) stopReviewer(data.stop.run, r.key)
+      }
+    }
+    if (typeof data.brief === 'string') {
+      const run = runs.get(data.brief)
+      if (brief?.run === data.brief || run === undefined) {
+        brief = null
+        await $.sidebar.popout({ id: TAB_ID, isShown: false })
+      } else {
+        const path = `${run.reportDir}/brief.md`
+        brief = { run: run.id, title: run.description, text: await $.fs.read(path), path }
+        await $.sidebar.popout({ id: TAB_ID, isShown: true })
+      }
+    }
+    $.ui.invalidate('ui.render')
+    return next(e)
+  })
+
+  on('ui.message', { element: BRIEF_KEY }, async ($, e, next) => {
+    if ((e.data as { close?: unknown }).close === true) {
+      brief = null
+      await $.sidebar.popout({ id: TAB_ID, isShown: false })
+    }
+    return next(e)
+  })
+
+  on('ui.render', { component: [...ROW_COMPONENTS] }, async ($, e, next) => {
+    const tree = await next(e)
+    if (e.surface !== 'terminal') return tree
+    const isDrawer = hasSlot(tree, DRAWER_SLOT)
+    const shown = brief !== null && hasSlot(tree, POPOUT_SLOT) ? brief : null
+    if (!isDrawer && shown === null) return tree
+    const room = await $.sidebar.room({})
+    if (room === null) return tree
+    const { Client } = $.ui.resolve(e)
+    let filled: unknown = tree
+    if (isDrawer) {
+      const props = overviewProps(await $.clock.now())
+      const height = Math.min(room.drawer, overviewLines(props).length)
+      filled = fillSlot(filled, DRAWER_SLOT, () => Client({ key: OVERVIEW_KEY, module: './overview.ts', props, width: OVERVIEW_COLUMNS, height }))
+    }
+    if (shown !== null) {
+      const props = briefProps(shown, room.popout)
+      filled = fillSlot(filled, POPOUT_SLOT, () => Client({ key: BRIEF_KEY, module: './brief.ts', props, width: OVERVIEW_COLUMNS, height: props.lines.length + 1 }))
+    }
+    return filled as typeof tree
   })
 
   on('agent.offer', { agent: 'crew:reviewer' }, () => ({ isOffered: claude.isOffered() }))
@@ -343,7 +525,10 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', ($, e, next) => {
-    if (e.agentId !== undefined) claude.settle(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage })
+    if (e.agentId !== undefined) {
+      claude.settle(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage })
+      claudeAgents.finished(e.agentId, e.reason === 'answer', e.usage === undefined ? undefined : claudeTokens(e.usage))
+    }
     return next(e)
   })
 }

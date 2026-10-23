@@ -7,7 +7,7 @@ import type { Job } from '../hooks/job.ts'
 import { settingsFrom, withDefaults } from '../hooks/config.ts'
 import { run } from '../hooks/proc.ts'
 import { parseFindings, renderFindings, systemPrompt, taskText } from '../hooks/prompt.ts'
-import { type Run, execute, keysFor, load, summary } from '../hooks/runs.ts'
+import { type Run, execute, keysFor, load, stopReviewer, summary } from '../hooks/runs.ts'
 import { SECRET_NAME, findSecrets, resolveRoots, siblingsOf } from '../hooks/scope.ts'
 import { type Fake, fakeIo, ok } from './fake-io.ts'
 
@@ -318,6 +318,40 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
   const s = summary(r)
   expect(s).toContain('- codex-default (default): SIGNED OUT: Codex is signed out')
   expect(s).toContain('claude-p is a stub')
+})
+
+test('a running Codex reviewer stopped from the tab is killed and reads as stopped; a finished one keeps its tokens', async () => {
+  const io: Fake = fakeIo({
+    files: FILES,
+    dirs: DIRS,
+    run: () => ok('Logged in using ChatGPT'),
+    spawn: (_, n) =>
+      n === 0
+        ? { hang: true }
+        : { stdout: ['{"type":"turn.completed","usage":{"input_tokens":900,"cached_input_tokens":600,"output_tokens":40,"reasoning_output_tokens":10}}\n'] },
+  })
+  const reviewer = (key: string) => ({ provider: 'codex' as const, key, status: 'running' as const, dir: `/c/runs/r2/${key}`, startedAt: 0 })
+  const r: Run = {
+    id: 'r2',
+    description: 'Stop me',
+    createdAt: 0,
+    reportDir: `${PROJECT}/.claude/work/reviews/r2-stop-me`,
+    runDir: '/c/runs/r2',
+    roots: [PROJECT],
+    secrets: [],
+    web: false,
+    helpers: false,
+    reviewers: [reviewer('codex-default'), reviewer('codex-default-2')],
+  }
+  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000 }
+  const done = execute(io, r, settings, 'SYS', 'TASK', '/c', async () => undefined, new Map())
+  for (let i = 0; i < 10_000 && io.spawned.length < 2; i++) await Promise.resolve()
+  expect(stopReviewer('r2', 'codex-default')).toBe(true)
+  await done
+  expect(r.reviewers.map(x => x.status)).toEqual(['stopped', 'failed'])
+  expect(io.killed).toBe(1)
+  expect(r.reviewers[1]!.tokens).toEqual({ in: 900, cached: 600, out: 40, reasoning: 10 })
+  expect(stopReviewer('r2', 'codex-default')).toBe(false)
 })
 
 test('a run left running by an earlier load of crew reads back as stopped', async () => {
