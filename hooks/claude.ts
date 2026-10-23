@@ -3,7 +3,7 @@ import type { Io } from './io.ts'
 import { profile } from './codex.ts'
 import type { FollowUp, Job, Outcome } from './job.ts'
 import { parseFindings } from './prompt.ts'
-import { SECRET_NAME, isInside } from './scope.ts'
+import { SECRET_NAME, isInside, parentOf, workFolder } from './scope.ts'
 
 export const AGENT = 'reviewer'
 export const AGENT_WEB = 'reviewer-web'
@@ -47,7 +47,7 @@ export function agentSpecs(system: string, approvedDir: string) {
 }
 
 /** What a running Claude reviewer may reach; keyed by its agentId. */
-export type Fence = { roots: readonly string[]; secrets: readonly string[]; codexBin: string }
+export type Fence = { roots: readonly string[]; files: readonly string[]; secrets: readonly string[]; codexBin: string }
 
 export const fences = new Map<string, Fence>()
 
@@ -103,15 +103,17 @@ export async function readRefusal(io: Io, fence: Fence, path: string): Promise<s
  * reviewer: read roots readable, secrets denied, nothing writable, no network.
  */
 export function fencedCommand(fence: Fence, command: string): string | undefined {
-  const root = fence.roots[0]
-  if (root === undefined) return undefined
+  const first = fence.roots[0]
+  if (first === undefined) return undefined
+  const work = workFolder(fence.roots, fence.files)
+  const root = work ?? parentOf(first)
   const args = [
     fence.codexBin,
     'sandbox',
     '-c',
     'default_permissions="crew"',
     '-c',
-    `permissions.crew.filesystem=${profile(fence.roots, fence.secrets)}`,
+    `permissions.crew.filesystem=${profile(fence.roots, fence.secrets, work)}`,
     '--',
     'sh',
     '-c',
@@ -172,7 +174,7 @@ export async function begin(io: Io, j: Job, codexBin: string, description: strin
   if (spawned.deny !== undefined || spawned.agentId === undefined) {
     return failed(model, `the reviewer agent did not start: ${spawned.deny ?? 'no agent id'}`)
   }
-  return arm(io, spawned.agentId, spawned.model, { roots: j.roots, secrets: j.secrets, codexBin }, j)
+  return arm(io, spawned.agentId, spawned.model, { roots: j.roots, files: j.files, secrets: j.secrets, codexBin }, j)
 }
 
 let resuming = 0
@@ -186,7 +188,7 @@ export const isOffered = (): boolean => resuming > 0
 /** Sends a follow-up; called inside the tool call, as `begin` is. */
 export async function beginFollowUp(io: Io, f: FollowUp, codexBin: string): Promise<Pending> {
   const model = f.model ?? DEFAULT_MODEL
-  const pending = arm(io, f.continueId, model, { roots: f.roots, secrets: f.secrets, codexBin }, f)
+  const pending = arm(io, f.continueId, model, { roots: f.roots, files: f.files, secrets: f.secrets, codexBin }, f)
   resuming++
   let sent
   try {

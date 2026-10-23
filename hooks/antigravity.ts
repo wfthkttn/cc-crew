@@ -3,7 +3,7 @@ import type { Io } from './io.ts'
 import type { FollowUp, Job, Outcome, Preflight } from './job.ts'
 import { describeEnd, run } from './proc.ts'
 import { FINDINGS_SCHEMA, parseFindings } from './prompt.ts'
-import { siblingsOf } from './scope.ts'
+import { folderOf, siblingsOf } from './scope.ts'
 
 export const AGENT = 'crew-reviewer'
 
@@ -104,7 +104,8 @@ async function execute(
     'stream-json',
     '--json-schema',
     `${j.dir}/schema.json`,
-    ...j.roots.flatMap(r => ['--add-dir', r]),
+    // a file is added by its folder; the deny rules close the rest of that folder
+    ...[...new Set(j.roots.map(r => folderOf(r, j.files)))].flatMap(d => ['--add-dir', d]),
     ...(j.model !== undefined ? ['--model', j.model] : []),
     ...(j.effort !== undefined ? ['--effort', j.effort] : []),
   ]

@@ -5,6 +5,8 @@ export type Job = {
   /** This reviewer's own folder for its files, absolute. */
   dir: string
   roots: readonly string[]
+  /** The roots that are files rather than folders. */
+  files: readonly string[]
   /** Secret files under the roots, absolute. */
   secrets: readonly string[]
   system: string

@@ -33,6 +33,8 @@ export type Run = {
   /** Raw harness output and state. */
   runDir: string
   roots: string[]
+  /** The roots that are files; absent in runs from before a file could be a read path. */
+  files?: string[]
   secrets: string[]
   web: boolean
   helpers: boolean
@@ -106,6 +108,7 @@ function job(run: Run, r: ReviewerState, system: string, task: string, s: Settin
   return {
     dir: r.dir,
     roots: run.roots,
+    files: run.files ?? [],
     secrets: run.secrets,
     system,
     task,

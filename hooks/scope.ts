@@ -24,7 +24,7 @@ export function parentOf(path: string): string {
   return cut <= 0 ? '/' : path.slice(0, cut)
 }
 
-async function realDir(io: Io, path: string): Promise<string> {
+async function realRoot(io: Io, path: string): Promise<{ path: string; isFile: boolean }> {
   let stat
   try {
     stat = await io.stat(path, { resolve: true })
@@ -32,26 +32,38 @@ async function realDir(io: Io, path: string): Promise<string> {
     throw new Error(`crew: read path not found: ${path} (${String(err)})`)
   }
   if (stat.realPath === undefined) throw new Error(`crew: read path does not resolve: ${path}`)
-  return stat.realPath
+  if (stat.kind === 'other') throw new Error(`crew: read path is neither a file nor a folder: ${path}`)
+  return { path: stat.realPath, isFile: stat.kind === 'file' }
 }
 
-/** The read roots as real absolute paths, none nested in another. */
-export async function resolveRoots(
-  io: Io,
-  read: ReadSpec,
-  project: string,
-): Promise<string[]> {
-  if (read === 'none') return []
+/** What a review may read: real absolute paths, none nested in another, and which of them are files. */
+export type Roots = { roots: string[]; files: string[] }
+
+export async function resolveRoots(io: Io, read: ReadSpec, project: string): Promise<Roots> {
+  if (read === 'none') return { roots: [], files: [] }
   const given = read === 'project' ? [project] : read.map(p => (p.startsWith('/') ? p : join(project, p)))
-  const real = await Promise.all(given.map(p => realDir(io, p)))
-  const unique = [...new Set(real)].sort()
-  return unique.filter(r => !unique.some(o => o !== r && isInside(r, o)))
+  const real = await Promise.all(given.map(p => realRoot(io, p)))
+  const unique = [...new Set(real.map(r => r.path))].sort()
+  const roots = unique.filter(r => !unique.some(o => o !== r && isInside(r, o)))
+  return { roots, files: roots.filter(r => real.some(x => x.path === r && x.isFile)) }
 }
 
-/** Every file under the roots whose name marks it as a secret, links included. */
-export async function findSecrets(io: Io, roots: readonly string[]): Promise<string[]> {
-  const found: string[] = []
-  const queue = [...roots]
+/** The folder a reviewer works in: the first read path that is a folder. */
+export function workFolder(roots: readonly string[], files: readonly string[]): string | undefined {
+  return roots.find(r => !files.includes(r))
+}
+
+/** Where a read path lies: itself for a folder, the folder holding it for a file. */
+export function folderOf(root: string, files: readonly string[]): string {
+  return files.includes(root) ? parentOf(root) : root
+}
+
+const isSecretName = (path: string) => SECRET_NAME.test(path.slice(path.lastIndexOf('/') + 1))
+
+/** Every file under the folder roots, and every file root, whose name marks it as a secret, links included. */
+export async function findSecrets(io: Io, roots: readonly string[], files: readonly string[]): Promise<string[]> {
+  const found = files.filter(isSecretName)
+  const queue = roots.filter(r => !files.includes(r))
   let seen = 0
   while (queue.length > 0) {
     const batch = queue.splice(0, 32)

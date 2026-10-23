@@ -45,6 +45,7 @@ function job(over: Partial<Job> = {}): Job {
   return {
     dir: '/home/u/.cache/crew/runs/r1/codex-default',
     roots: [PROJECT],
+    files: [],
     secrets: [`${PROJECT}/.env`],
     system: 'SYSTEM',
     task: 'TASK',
@@ -57,14 +58,28 @@ function job(over: Partial<Job> = {}): Job {
 
 test('secret files under the roots are found by name, .git left alone', async () => {
   const io = fakeIo({ files: FILES, dirs: DIRS })
-  expect(await findSecrets(io, [PROJECT])).toEqual([`${PROJECT}/.env`, `${PROJECT}/sub/.env.local`, `${PROJECT}/sub/cert.pem`])
+  expect(await findSecrets(io, [PROJECT], [])).toEqual([`${PROJECT}/.env`, `${PROJECT}/sub/.env.local`, `${PROJECT}/sub/cert.pem`])
+})
+
+test('a file root is a secret by its own name and is not listed', async () => {
+  const io = fakeIo({ files: FILES, dirs: DIRS })
+  const files = [`${PROJECT}/.env`, `${PROJECT}/main.ts`]
+  expect(await findSecrets(io, files, files)).toEqual([`${PROJECT}/.env`])
 })
 
 test('a root inside another root is dropped; a missing one is refused', async () => {
   const io = fakeIo({ files: FILES, dirs: DIRS })
-  expect(await resolveRoots(io, ['.', 'sub'], PROJECT)).toEqual([PROJECT])
-  expect(await resolveRoots(io, 'none', PROJECT)).toEqual([])
+  expect(await resolveRoots(io, ['.', 'sub', 'main.ts'], PROJECT)).toEqual({ roots: [PROJECT], files: [] })
+  expect(await resolveRoots(io, 'none', PROJECT)).toEqual({ roots: [], files: [] })
   await expect(resolveRoots(io, ['nope'], PROJECT)).rejects.toThrow('read path not found')
+})
+
+test('a file can be a read path, told apart from the folders', async () => {
+  const io = fakeIo({ files: FILES, dirs: DIRS })
+  expect(await resolveRoots(io, ['sub', 'main.ts'], PROJECT)).toEqual({
+    roots: [`${PROJECT}/main.ts`, `${PROJECT}/sub`],
+    files: [`${PROJECT}/main.ts`],
+  })
 })
 
 test('everything beside the way down to the kept paths is denied', async () => {
@@ -74,11 +89,24 @@ test('everything beside the way down to the kept paths is denied', async () => {
 })
 
 test('the Codex profile reads the roots, denies secrets and starts from nothing else', () => {
-  const p = codex.profile([PROJECT, '/srv/docs'], [`${PROJECT}/.env`])
+  const p = codex.profile([PROJECT, '/srv/docs'], [`${PROJECT}/.env`], PROJECT)
   expect(p).toStartWith('{":minimal"="read", ":workspace_roots"={"."="read", "**/.env"="deny"')
   expect(p).toContain('"/srv/docs"="read"')
+  expect(p).not.toContain(`"${PROJECT}"="read"`)
   expect(p).toContain(`"${PROJECT}/.env"="deny"`)
   expect(p).not.toContain(':root')
+})
+
+test('a Codex review of files alone runs in an empty folder with each file readable', async () => {
+  const j = job({ roots: [`${PROJECT}/main.ts`], files: [`${PROJECT}/main.ts`], secrets: [] })
+  const io = fakeIo({
+    spawn: () => ({ stdout: ['{"type":"thread.started","thread_id":"th-1"}\n'], writes: { [`${j.dir}/answer.txt`]: JSON.stringify(FINDINGS) } }),
+  })
+  expect((await codex.review(io, 'codex', j)).status).toBe('ok')
+  const req = io.spawned[0]!
+  expect(req.cwd).toBe(`${j.dir}/empty`)
+  const profile = req.argv.find(a => a.startsWith('permissions.crew.filesystem='))!
+  expect(profile).toBe(`permissions.crew.filesystem={":minimal"="read", "${PROJECT}/main.ts"="read"}`)
 })
 
 test('a Codex review answers its findings and its thread', async () => {
@@ -158,10 +186,28 @@ test('an Antigravity review runs the fenced reviewer agent in its own home', asy
   expect(settings.permissions.deny).toContain('read_file(/tmp)')
   expect(settings.permissions.deny).toContain('read_file(/home/u/notes.txt)')
   expect(settings.permissions.deny).not.toContain(`read_file(${PROJECT})`)
+  expect(req.argv[req.argv.indexOf('--add-dir') + 1]).toBe(PROJECT)
   const agent = io.files.get(`${j.dir}/work/.agents/agents/${agy.AGENT}/agent.md`)!
   expect(agent).toContain('tools: [view_file, list_dir, find_by_name, finish]')
   expect(agent).toContain('excludeDefaultComponents: true')
   expect(agent).toContain('SYSTEM')
+})
+
+test('an Antigravity review of a file adds its folder and closes the rest of it', async () => {
+  const main = `${PROJECT}/main.ts`
+  const j = job({ dir: '/r/a', roots: [main], files: [main], secrets: [] })
+  const io = fakeIo({
+    files: FILES,
+    dirs: [...DIRS, '/r', '/r/a', '/r/a/work'],
+    spawn: () => ({ stdout: [agyResult(JSON.stringify(FINDINGS))] }),
+  })
+  expect((await agy.review(io, 'agy', j)).status).toBe('ok')
+  const argv = io.spawned[0]!.argv
+  expect(argv.filter((a, i) => argv[i - 1] === '--add-dir')).toEqual([PROJECT])
+  const deny = JSON.parse(io.files.get(`${j.dir}/home/.gemini/antigravity-cli/settings.json`)!).permissions.deny
+  expect(deny).toContain(`read_file(${PROJECT}/.env)`)
+  expect(deny).toContain(`read_file(${PROJECT}/sub)`)
+  expect(deny).not.toContain(`read_file(${main})`)
 })
 
 test('an Antigravity run that left its paths is tried once more, warned', async () => {
@@ -203,18 +249,25 @@ test('the rule files follow the shared prompt; the task states the access', () =
 
 test('a Claude reviewer may read inside its roots, never a secret, never outside', async () => {
   const io = fakeIo({ files: FILES, dirs: DIRS })
-  const fence = { roots: [PROJECT], secrets: [`${PROJECT}/.env`], codexBin: 'codex' }
+  const fence = { roots: [PROJECT], files: [], secrets: [`${PROJECT}/.env`], codexBin: 'codex' }
   expect(await claude.readRefusal(io, fence, `${PROJECT}/main.ts`)).toBeUndefined()
   expect(await claude.readRefusal(io, fence, `${PROJECT}/.env`)).toContain('secret')
   expect(await claude.readRefusal(io, fence, '/home/u/notes.txt')).toContain('outside')
+  const file = { ...fence, roots: [`${PROJECT}/main.ts`], files: [`${PROJECT}/main.ts`] }
+  expect(await claude.readRefusal(io, file, `${PROJECT}/main.ts`)).toBeUndefined()
+  expect(await claude.readRefusal(io, file, `${PROJECT}/sub/cert.pem`)).toContain('outside')
 })
 
 test("a Claude reviewer's shell runs inside Codex's sandbox", () => {
-  const fence = { roots: [PROJECT], secrets: [], codexBin: '/bin/codex' }
+  const fence = { roots: [PROJECT], files: [], secrets: [], codexBin: '/bin/codex' }
   const cmd = claude.fencedCommand(fence, "grep -r 'x' .")!
   expect(cmd).toStartWith(`cd '${PROJECT}' && '/bin/codex' 'sandbox'`)
   expect(cmd).toEndWith(`'--' 'sh' '-c' 'grep -r '\\''x'\\'' .'`)
   expect(claude.fencedCommand({ ...fence, roots: [] }, 'ls')).toBeUndefined()
+  const main = `${PROJECT}/main.ts`
+  const onFile = claude.fencedCommand({ ...fence, roots: [main], files: [main] }, 'cat main.ts')!
+  expect(onFile).toStartWith(`cd '${PROJECT}' && `)
+  expect(onFile).toContain(`'permissions.crew.filesystem={":minimal"="read", "${main}"="read"}'`)
 })
 
 test('a run reports each reviewer, alerts on a sign-in, and sums up', async () => {

@@ -7,7 +7,7 @@ import type { Io } from './io.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
 import { type Alert, type ReviewerSpec, type Run, ask, beginClaude, continueOne, execute, keysFor, load, runs, slugOf, summary } from './runs.ts'
-import { type ReadSpec, findSecrets, isInside, resolveRoots } from './scope.ts'
+import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -193,10 +193,10 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   const io = ioOf($)
   const project = await $.session.root()
   const base = reportBase(f, project)
-  const roots = await resolveRoots(io, read, project)
+  const { roots, files } = await resolveRoots(io, read, project)
   if (changes !== undefined && roots[0] === undefined) throw new BadInput('changes needs a read path holding the repository')
-  const secrets = await findSecrets(io, roots)
-  const change = changes !== undefined && roots[0] !== undefined ? await changeOf(io, roots[0], changes) : undefined
+  const secrets = await findSecrets(io, roots, files)
+  const change = changes !== undefined && roots[0] !== undefined ? await changeOf(io, folderOf(roots[0], files), changes) : undefined
   const id = await runId($)
   const runDir = `${cacheDir}/runs/${id}`
   const keys = keysFor(specs)
@@ -208,6 +208,7 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
     reportDir: `${base}/${id}-${slugOf(description)}`,
     runDir,
     roots,
+    files,
     secrets,
     web,
     helpers,

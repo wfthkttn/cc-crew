@@ -3,6 +3,7 @@ import type { Io } from './io.ts'
 import type { FollowUp, Job, Outcome, Preflight } from './job.ts'
 import { describeEnd, run } from './proc.ts'
 import { FINDINGS_SCHEMA, parseFindings } from './prompt.ts'
+import { workFolder } from './scope.ts'
 
 const SECRET_GLOBS = [
   '**/.env',
@@ -28,15 +29,16 @@ const toml = (s: string) => JSON.stringify(s)
 
 /**
  * The permission profile: system tools and the read roots readable, secrets denied, nothing
- * writable. With no `:root` entry the sandbox starts from an empty filesystem.
+ * writable. With no `:root` entry the sandbox starts from an empty filesystem. `work` is the
+ * root Codex runs in, its workspace root; absent, every root is an entry of its own.
  */
-export function profile(roots: readonly string[], secrets: readonly string[]): string {
+export function profile(roots: readonly string[], secrets: readonly string[], work: string | undefined): string {
   const entries = [`${toml(':minimal')}=${toml('read')}`]
-  if (roots.length > 0) {
+  if (work !== undefined) {
     const scoped = [`${toml('.')}=${toml('read')}`, ...SECRET_GLOBS.map(g => `${toml(g)}=${toml('deny')}`)]
     entries.push(`${toml(':workspace_roots')}={${scoped.join(', ')}}`)
   }
-  for (const r of roots.slice(1)) entries.push(`${toml(r)}=${toml('read')}`)
+  for (const r of roots) if (r !== work) entries.push(`${toml(r)}=${toml('read')}`)
   for (const s of secrets) entries.push(`${toml(s)}=${toml('deny')}`)
   return `{${entries.join(', ')}}`
 }
@@ -53,7 +55,7 @@ function options(bin: string, j: Omit<Job, 'task'>, cwd: string): string[] {
     '-c',
     'default_permissions="crew"',
     '-c',
-    `permissions.crew.filesystem=${profile(j.roots, j.secrets)}`,
+    `permissions.crew.filesystem=${profile(j.roots, j.secrets, workFolder(j.roots, j.files))}`,
     '-c',
     'approval_policy="never"',
     '-c',
@@ -146,18 +148,19 @@ async function execute(io: Io, argv: string[], cwd: string, input: string, j: Om
   return { ...base, status: 'failed', text, detail }
 }
 
-async function workDir(io: Io, roots: readonly string[], dir: string): Promise<string> {
-  if (roots[0] !== undefined) return roots[0]
-  await io.write(`${dir}/empty/.keep`, '')
-  return `${dir}/empty`
+async function workDir(io: Io, j: Omit<Job, 'task'>): Promise<string> {
+  const work = workFolder(j.roots, j.files)
+  if (work !== undefined) return work
+  await io.write(`${j.dir}/empty/.keep`, '')
+  return `${j.dir}/empty`
 }
 
 export async function review(io: Io, bin: string, j: Job): Promise<Outcome> {
-  const cwd = await workDir(io, j.roots, j.dir)
+  const cwd = await workDir(io, j)
   return execute(io, [...options(bin, j, cwd), '-'], cwd, j.task, j)
 }
 
 export async function followUp(io: Io, bin: string, f: FollowUp): Promise<Outcome> {
-  const cwd = await workDir(io, f.roots, f.dir)
+  const cwd = await workDir(io, f)
   return execute(io, [...options(bin, f, cwd), 'resume', f.continueId, '-'], cwd, f.message, f)
 }
