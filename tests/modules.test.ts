@@ -6,8 +6,8 @@ import * as codex from '../hooks/codex.ts'
 import type { Job } from '../hooks/job.ts'
 import { run } from '../hooks/proc.ts'
 import { parseFindings, renderFindings, systemPrompt, taskText } from '../hooks/prompt.ts'
-import { type Run, execute, keysFor, summary } from '../hooks/runs.ts'
-import { findSecrets, resolveRoots, siblingsOf } from '../hooks/scope.ts'
+import { type Run, execute, keysFor, load, summary } from '../hooks/runs.ts'
+import { SECRET_NAME, findSecrets, resolveRoots, siblingsOf } from '../hooks/scope.ts'
 import { type Fake, fakeIo, ok } from './fake-io.ts'
 
 const PROJECT = '/home/u/Projects/p'
@@ -159,7 +159,7 @@ test('an Antigravity review runs the fenced reviewer agent in its own home', asy
   expect(settings.permissions.deny).toContain('read_file(/home/u/notes.txt)')
   expect(settings.permissions.deny).not.toContain(`read_file(${PROJECT})`)
   const agent = io.files.get(`${j.dir}/work/.agents/agents/${agy.AGENT}/agent.md`)!
-  expect(agent).toContain('tools: [view_file, list_dir, grep_search, find_by_name, finish]')
+  expect(agent).toContain('tools: [view_file, list_dir, find_by_name, finish]')
   expect(agent).toContain('excludeDefaultComponents: true')
   expect(agent).toContain('SYSTEM')
 })
@@ -253,4 +253,45 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
   const s = summary(r)
   expect(s).toContain('- codex-default (default): SIGNED OUT: Codex is signed out')
   expect(s).toContain('claude-p is a stub')
+})
+
+test('a run left running by an earlier load of crew reads back as stopped', async () => {
+  const stale: Run = {
+    id: 'old1',
+    description: 'Old',
+    createdAt: 0,
+    reportDir: `${PROJECT}/.claude/work/reviews/old1-old`,
+    runDir: '/c/runs/old1',
+    roots: [PROJECT],
+    secrets: [],
+    web: false,
+    helpers: false,
+    reviewers: [
+      { provider: 'codex', key: 'codex-default', status: 'running', dir: '/c/runs/old1/codex-default', startedAt: 0 },
+      { provider: 'claude', key: 'claude-sonnet', status: 'ok', dir: '/c/runs/old1/claude-sonnet', startedAt: 0 },
+    ],
+  }
+  const io = fakeIo({ files: { '/c/runs/old1/run.json': JSON.stringify(stale) } })
+  const run = await load(io, '/c', 'old1')
+  expect(run.reviewers.map(r => r.status)).toEqual(['stopped', 'ok'])
+  expect(JSON.parse(io.files.get('/c/runs/old1/run.json')!).reviewers[0].status).toBe('stopped')
+  expect(summary(run)).toContain('codex-default (default): STOPPED: cut off')
+})
+
+test('secret names cover keys, tokens and cloud credentials', () => {
+  for (const name of ['.envrc', '.git-credentials', '.npmrc', '.pypirc', 'cert.p12', 'id.pfx', 'vault.kdbx', 'terraform.tfstate', 'terraform.tfstate.backup', 'credentials', 'kubeconfig']) {
+    expect(SECRET_NAME.test(name)).toBe(true)
+  }
+  for (const name of ['main.ts', 'envrc.md', 'credentials.ts', 'secrets.rs', 'keys.txt']) {
+    expect(SECRET_NAME.test(name)).toBe(false)
+  }
+})
+
+test('the Claude reviewer is held by its own gate on every Read and Bash', () => {
+  const [spec] = claude.agentSpecs('SYS', '/c/approved')
+  const pre = (spec!.hooks as { PreToolUse: { matcher: string; hooks: { command: string }[] }[] }).PreToolUse
+  expect(pre[0]!.matcher).toBe('Read|Bash')
+  expect(pre[0]!.hooks[0]!.command).toContain(`'/c/approved'/"$id"`)
+  expect(pre[0]!.hooks[0]!.command).toContain('exit 2')
+  expect(claude.approvedMark('/c/approved', 'toolu_1')).toBe('/c/approved/toolu_1')
 })

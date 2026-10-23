@@ -15,7 +15,8 @@ type Paths = { home: string; work: string }
 const paths = (stateDir: string): Paths => ({ home: `${stateDir}/home`, work: `${stateDir}/work` })
 
 function agentFile(system: string, web: boolean, helpers: boolean): string {
-  const tools = ['view_file', 'list_dir', 'grep_search', 'find_by_name', 'finish']
+  // No grep_search: it prints lines of files the read_file deny rules close, secret files included.
+  const tools = ['view_file', 'list_dir', 'find_by_name', 'finish']
   if (web) tools.push('search_web', 'read_url_content')
   if (helpers) tools.push('invoke_subagent')
   return [

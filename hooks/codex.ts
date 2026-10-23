@@ -4,7 +4,25 @@ import type { FollowUp, Job, Outcome, Preflight } from './job.ts'
 import { describeEnd, run } from './proc.ts'
 import { FINDINGS_SCHEMA, parseFindings } from './prompt.ts'
 
-const SECRET_GLOBS = ['**/.env', '**/.env.*', '**/*.env', '**/*.pem', '**/*.key']
+const SECRET_GLOBS = [
+  '**/.env',
+  '**/.env.*',
+  '**/*.env',
+  '**/.envrc',
+  '**/*.pem',
+  '**/*.key',
+  '**/*.p12',
+  '**/*.pfx',
+  '**/*.kdbx',
+  '**/*.tfstate',
+  '**/*.tfstate.backup',
+  '**/.git-credentials',
+  '**/.npmrc',
+  '**/.pypirc',
+  '**/credentials',
+  '**/credentials.json',
+  '**/kubeconfig',
+]
 
 const toml = (s: string) => JSON.stringify(s)
 

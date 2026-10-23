@@ -17,7 +17,7 @@ Brief it like a colleague who just walked into the room: the reviewers know noth
 
 Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out or out of quota is reported loudly and the others carry on.
 
-Models: codex takes its own model names (default: Codex's default) and effort low|medium|high|xhigh. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku; its effort is the session's.`
+Models: codex takes its own model names (default: Codex's default) and effort low|medium|high|xhigh. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku (default sonnet); its effort is the session's.`
 
 const REVIEWER_ITEM = {
   type: 'object',
@@ -40,7 +40,11 @@ const REVIEW_SCHEMA = {
       description: '"project" (default), "none", or a list of paths (absolute, or relative to the project)',
       anyOf: [{ type: 'string', enum: ['project', 'none'] }, { type: 'array', items: { type: 'string' } }],
     },
-    web: { type: 'boolean', description: 'Allow web search and page reads (default false)' },
+    web: {
+      type: 'boolean',
+      description:
+        'Allow web search and page reads (default false). Content under review can then steer a reviewer into fetching a URL that carries what it read: secrets stay closed, the reviewed code does not.',
+    },
     helpers: { type: 'boolean', description: "Let Codex and Antigravity reviewers run their own helper agents (default false)" },
     changes: {
       description: 'Review a change: "uncommitted", { "base": "<branch>" } or { "commit": "<sha>" } in the first read path',
@@ -78,6 +82,7 @@ const STATUS_SCHEMA = {
 let settings: Settings
 let system = REVIEWER_PROMPT
 let cacheDir = ''
+const approvedDir = () => `${cacheDir}/approved`
 
 const alert: Alert = async (io, provider, detail) => {
   try {
@@ -257,8 +262,14 @@ async function status($: EngineInterface, f: Fields): Promise<string> {
   if (typeof f.run === 'string') return summary(await load(io, cacheDir, f.run))
   const lines = [...runs.values()].map(r => summary(r).split('\n')[0]!)
   if (lines.length === 0) lines.push('No crew reviews in this session.')
-  const quota = await runChild(io, { argv: [settings.agyBin, '-p', '/quota'], env: { HOME: `${cacheDir}/agy-home` } }, { timeoutMs: 20_000 })
-  lines.push('', 'Antigravity quota:', quota.ended.kind === 'exited' && quota.ended.code === 0 ? quota.stdout.trim() : `unavailable (${describeEnd(quota)})`)
+  let agyQuota: string
+  try {
+    const quota = await runChild(io, { argv: [settings.agyBin, '-p', '/quota'], env: { HOME: `${cacheDir}/agy-home` } }, { timeoutMs: 20_000 })
+    agyQuota = quota.ended.kind === 'exited' && quota.ended.code === 0 ? quota.stdout.trim() : `unavailable (${describeEnd(quota)})`
+  } catch (err) {
+    agyQuota = `unavailable: ${settings.agyBin} did not run (${String(err)})`
+  }
+  lines.push('', 'Antigravity quota:', agyQuota)
   lines.push('Codex quota: not read yet (needs its app-server).')
   return lines.join('\n')
 }
@@ -284,7 +295,7 @@ export const register: Register = (on, options) => {
     cacheDir = `${home}/.cache/crew`
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
-    for (const spec of claude.agentSpecs(system)) await $.agent.register(spec)
+    for (const spec of claude.agentSpecs(system, approvedDir())) await $.agent.register(spec)
     await $.tool.register({ name: 'review', description: REVIEW_DESCRIPTION, inputSchema: REVIEW_SCHEMA, isDeferred: false })
     await $.tool.register({
       name: 'review_continue',
@@ -312,7 +323,9 @@ export const register: Register = (on, options) => {
     if (fence === 'not-ours') return next(e)
     if (fence === undefined) return { deny: 'crew: this reviewer has no read limits in place' }
     const refusal = await claude.readRefusal(ioOf($), fence, e.file_path)
-    return refusal !== undefined ? { deny: `crew: ${refusal}` } : next(e)
+    if (refusal !== undefined) return { deny: `crew: ${refusal}` }
+    await $.fs.write(claude.approvedMark(approvedDir(), e.tool_use_id), '')
+    return next(e)
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'crew: the read guard failed' }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -322,6 +335,7 @@ export const register: Register = (on, options) => {
     if (fence === undefined) return { deny: 'crew: this reviewer has no read limits in place' }
     const command = claude.fencedCommand(fence, e.command)
     if (command === undefined) return { deny: 'crew: this review may read nothing on disk' }
+    await $.fs.write(claude.approvedMark(approvedDir(), e.tool_use_id), '')
     return next({ ...e, command, run_in_background: false })
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'crew: the shell guard failed' }))
 

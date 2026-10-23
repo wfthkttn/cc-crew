@@ -7,12 +7,33 @@ import { SECRET_NAME, isInside } from './scope.ts'
 
 export const AGENT = 'reviewer'
 export const AGENT_WEB = 'reviewer-web'
+export const DEFAULT_MODEL = 'sonnet'
 
-export function agentSpecs(system: string) {
+const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`
+
+/**
+ * The reviewer's own PreToolUse command: a Read or Bash call goes ahead only when crew's guard
+ * left a mark for its tool_use_id in `approvedDir`. It holds the reviewer closed should the
+ * engine ever run the reviewer's calls past this plugin's hooks.
+ */
+export function gateCommand(approvedDir: string): string {
+  return [
+    `id=$(sed -n 's/.*"tool_use_id" *: *"\\([^"]*\\)".*/\\1/p' | head -n 1)`,
+    `f=${shq(approvedDir)}/"$id"`,
+    'if [ -n "$id" ] && [ -e "$f" ]; then rm -f "$f"; exit 0; fi',
+    `echo 'crew: this call did not pass the review guard' >&2`,
+    'exit 2',
+  ].join('; ')
+}
+
+export const approvedMark = (approvedDir: string, toolUseId: string) => `${approvedDir}/${toolUseId}`
+
+export function agentSpecs(system: string, approvedDir: string) {
   const base = {
     prompt: system,
     omitClaudeMd: true as const,
     maxTurns: 80,
+    hooks: { PreToolUse: [{ matcher: 'Read|Bash', hooks: [{ type: 'command', command: gateCommand(approvedDir) }] }] },
   }
   return [
     { ...base, name: AGENT, description: 'Read-only reviewer run by the crew review tool', tools: ['Read', 'Bash'] },
@@ -30,6 +51,8 @@ export type Fence = { roots: readonly string[]; secrets: readonly string[]; code
 
 export const fences = new Map<string, Fence>()
 
+const notOurs = new Set<string>()
+
 /**
  * The fence of a crew reviewer, `not-ours` for any other agent, or undefined for a crew
  * reviewer whose fence never arrived. A spawn answers its agentId only once the agent runs,
@@ -38,8 +61,12 @@ export const fences = new Map<string, Fence>()
 export async function fenceFor(io: Io, agentId: string): Promise<Fence | 'not-ours' | undefined> {
   const known = fences.get(agentId)
   if (known !== undefined) return known
+  if (notOurs.has(agentId)) return 'not-ours'
   const info = (await io.agents()).find(a => a.id === agentId)
-  if (info === undefined || !info.type.startsWith('crew:')) return 'not-ours'
+  if (info === undefined || !info.type.startsWith('crew:')) {
+    if (info !== undefined) notOurs.add(agentId)
+    return 'not-ours'
+  }
   for (let i = 0; i < 50; i++) {
     await io.sleep(100)
     const fence = fences.get(agentId)
@@ -70,8 +97,6 @@ export async function readRefusal(io: Io, fence: Fence, path: string): Promise<s
   if (SECRET_NAME.test(name) || fence.secrets.includes(real)) return `${path} is a secret file`
   return undefined
 }
-
-const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`
 
 /**
  * The reviewer's shell command, run inside Codex's sandbox under the same profile as a Codex
@@ -142,14 +167,10 @@ function arm(io: Io, agentId: string, model: string, fence: Fence, j: Pick<Job, 
  * plugin's hooks on the calls of an agent started there, and not on one started from a timer.
  */
 export async function begin(io: Io, j: Job, codexBin: string, description: string): Promise<Pending> {
-  const spawned = await io.spawnAgent({
-    subagentType: `crew:${j.web ? AGENT_WEB : AGENT}`,
-    prompt: j.task,
-    description,
-    ...(j.model !== undefined ? { model: j.model } : {}),
-  })
+  const model = j.model ?? DEFAULT_MODEL
+  const spawned = await io.spawnAgent({ subagentType: `crew:${j.web ? AGENT_WEB : AGENT}`, prompt: j.task, description, model })
   if (spawned.deny !== undefined || spawned.agentId === undefined) {
-    return failed(j.model ?? 'inherit', `the reviewer agent did not start: ${spawned.deny ?? 'no agent id'}`)
+    return failed(model, `the reviewer agent did not start: ${spawned.deny ?? 'no agent id'}`)
   }
   return arm(io, spawned.agentId, spawned.model, { roots: j.roots, secrets: j.secrets, codexBin }, j)
 }
@@ -164,7 +185,7 @@ export const isOffered = (): boolean => resuming > 0
 
 /** Sends a follow-up; called inside the tool call, as `begin` is. */
 export async function beginFollowUp(io: Io, f: FollowUp, codexBin: string): Promise<Pending> {
-  const model = f.model ?? 'inherit'
+  const model = f.model ?? DEFAULT_MODEL
   const pending = arm(io, f.continueId, model, { roots: f.roots, secrets: f.secrets, codexBin }, f)
   resuming++
   let sent

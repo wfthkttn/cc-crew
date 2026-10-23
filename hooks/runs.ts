@@ -68,12 +68,23 @@ export async function save(io: Io, run: Run): Promise<void> {
   await io.write(`${run.reportDir}/run.json`, text)
 }
 
+/**
+ * A run this module holds, or one read from disk. Reviewers still marked running on disk were
+ * cut off when an earlier load of crew ended (a reload, the session's end): they are marked
+ * stopped, as nothing is left to finish them.
+ */
 export async function load(io: Io, cacheDir: string, id: string): Promise<Run> {
   const known = runs.get(id)
   if (known !== undefined) return known
   const path = `${cacheDir}/runs/${id}/run.json`
   if (!(await io.exists(path))) throw new Error(`crew: no review run ${id}`)
   const run = JSON.parse(await io.read(path)) as Run
+  const cut = run.reviewers.filter(r => r.status === 'running')
+  for (const r of cut) {
+    r.status = 'stopped'
+    r.detail = 'cut off: crew reloaded or the session ended before it finished'
+  }
+  if (cut.length > 0) await save(io, run)
   runs.set(id, run)
   return run
 }
@@ -157,7 +168,7 @@ export async function beginClaude(
       begun.set(r.key, await claude.begin(io, j, s.codexBin, `crew review: ${run.description}`))
     } catch (err) {
       const detail = `the reviewer agent did not start: ${String(err)}`
-      begun.set(r.key, { wait: async () => ({ status: 'failed', text: '', model: r.model ?? 'inherit', detail }) })
+      begun.set(r.key, { wait: async () => ({ status: 'failed', text: '', model: r.model ?? claude.DEFAULT_MODEL, detail }) })
     }
   }
   return begun
@@ -293,6 +304,7 @@ const LOUD: Partial<Record<Status | 'running', string>> = {
   quota: 'OUT OF QUOTA',
   failed: 'FAILED',
   timeout: 'TIMED OUT',
+  stopped: 'STOPPED',
   left_roots: 'LEFT ITS READ PATHS',
 }
 

@@ -3,7 +3,7 @@ import type { Io } from './io.ts'
 export type ReadSpec = 'project' | 'none' | readonly string[]
 
 export const SECRET_NAME =
-  /^(\.env(\..+)?|.+\.env|.+\.pem|.+\.key|id_(rsa|ed25519|ecdsa|dsa)|\.netrc|\.pgpass|credentials\.json)$/
+  /^(\.env(\..+)?|.+\.env|\.envrc|.+\.(pem|key|p12|pfx|kdbx|tfstate)|.+\.tfstate\.backup|id_(rsa|ed25519|ecdsa|dsa)|\.netrc|\.pgpass|\.git-credentials|\.npmrc|\.pypirc|credentials(\.json)?|kubeconfig)$/
 
 const SKIP_DIRS = new Set(['.git'])
 
