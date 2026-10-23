@@ -81,19 +81,19 @@
       "default": 20,
       "min": 0
     },
-    "limit_review_tokens": {
+    "limit_model_tokens": {
       "type": "number",
-      "title": "Review tokens per session",
-      "description": "Tokens (new input plus output; cache reads not counted) one session's reviewers may spend",
-      "default": 10000000,
-      "min": 0
-    },
-    "limit_agent_tokens": {
-      "type": "number",
-      "title": "Claude agent tokens per session",
-      "description": "Tokens (new input plus output) one session's own subagents and workflow agents may spend; past it new ones are refused",
+      "title": "Weighted tokens per model per session",
+      "description": "Tokens one session's reviewers and Claude agents may spend on each model, weighted as API prices weigh them (new input 1, cache reads 0.1, cache writes 1.25, output 5); past it, reviews and agents on that model are refused",
       "default": 20000000,
       "min": 0
+    },
+    "model_limits": {
+      "type": "string",
+      "multiple": true,
+      "title": "Per-model token limits",
+      "description": "Models with a weighted-token limit of their own, named as the crew tab names them: \"claude opus=10M\", \"codex default=40M\", \"agy gemini-3.8-flash=60M\"",
+      "default": []
     }
   }
 }

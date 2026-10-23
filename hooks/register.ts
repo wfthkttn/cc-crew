@@ -7,9 +7,9 @@ import { type ChangeSpec, changeOf } from './changes.ts'
 import * as claude from './claude.ts'
 import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
-import { agentRefusal, followUpRefusal, GATES, type Gate, reviewRefusal } from './limits.ts'
+import { agentRefusal, claudeModel, followUpRefusal, GATES, type Gate, reviewerModel, reviewRefusal } from './limits.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
-import type { DetailProps, Raise, Tab, Target } from './overview-props.ts'
+import type { DetailProps, Tab, Target } from './overview-props.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
 import { describeEnd, run as runChild } from './proc.ts'
 import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
@@ -268,12 +268,31 @@ function reportBase(f: Fields, project: string): string {
   return path
 }
 
+/** Characters per `$.fs.write`: at most 4 bytes each in UTF-8, so a piece stays under the engine's 4 MiB a write. */
+const WRITE_PIECE = 1024 * 1024
+
+/**
+ * Writes a file of any size: one past a piece goes in pieces, which a shell joins. Antigravity's deny list for a read
+ * path in a folder as full as /nix/store runs past 4 MiB.
+ */
+async function writeFile($: EngineInterface, path: string, text: string): Promise<void> {
+  if (text.length <= WRITE_PIECE) return $.fs.write(path, text)
+  const pieces: string[] = []
+  for (let at = 0; at < text.length; at += WRITE_PIECE) {
+    const piece = `${path}.piece-${pieces.length}`
+    await $.fs.write(piece, text.slice(at, at + WRITE_PIECE))
+    pieces.push(piece)
+  }
+  const joined = await $.process.run(['sh', '-c', 'out="$1"; shift; cat -- "$@" > "$out" && rm -- "$@"', 'sh', path, ...pieces])
+  if (joined.exitCode !== 0) throw new Error(`crew: could not join ${pieces.length} pieces into ${path} (exit ${joined.exitCode}): ${joined.stderr.trim()}`)
+}
+
 function ioOf($: EngineInterface): Io {
   return {
     stat: (path, options) => $.fs.stat(path, options),
     list: path => $.fs.list(path),
     read: path => $.fs.read(path),
-    write: (path, text) => $.fs.write(path, text),
+    write: (path, text) => writeFile($, path, text),
     exists: path => $.fs.exists(path),
     spawn: request => $.process.spawn(request),
     run: (argv, init) => $.process.run(argv, init),
@@ -309,7 +328,8 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   const description = str(f, 'description')
   const brief = str(f, 'prompt')
   const specs = reviewersOf(f)
-  const refusal = reviewRefusal(currentLimits(), currentSpent(), specs.map(s => s.provider))
+  const models = specs.map(s => reviewerModel(s.provider, s.model))
+  const refusal = reviewRefusal(currentLimits(), currentSpent(), specs.map(s => s.provider), models)
   if (refusal !== undefined) throw new BadInput(refusal)
   const read = readOf(f)
   const changes = changesOf(f)
@@ -367,7 +387,7 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
   const r = run.reviewers.find(x => x.key === key)
   if (r === undefined) throw new BadInput(`run ${run.id} has no reviewer ${key}; it has ${run.reviewers.map(x => x.key).join(', ')}`)
   if (r.status === 'running') throw new BadInput(`${key} is still running`)
-  const refusal = followUpRefusal(currentLimits(), currentSpent(), r.provider)
+  const refusal = followUpRefusal(currentLimits(), currentSpent(), r.provider, reviewerModel(r.provider, r.usedModel ?? r.model))
   if (refusal !== undefined) throw new BadInput(refusal)
   if (f.background === false) {
     await continueOne(io, run, r, settings, await ask(io, run, r, settings, system, message, signal), alert)
@@ -446,7 +466,8 @@ export const register: Register = (on, options) => {
   on('agent.spawn', async ($, e, next) => {
     // crew's own reviewers show under their run and count against the review limits.
     if (e.subagentType.startsWith('crew:')) return next(e)
-    const refusal = agentRefusal(currentLimits(), currentSpent())
+    // An agent type with a model of its own is gated on the asked or the parent's: the plugin API does not tell its type's model.
+    const refusal = agentRefusal(currentLimits(), currentSpent(), claudeModel(e.model ?? e.parentModel))
     if (refusal !== undefined) return { deny: `crew: ${refusal}` }
     const spawned = await next(e)
     if (spawned.deny === undefined && spawned.agentId !== undefined) {
@@ -480,9 +501,13 @@ export const register: Register = (on, options) => {
     }
     if (data.tab === 'running' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
-    if (data.raise === 'reviewRuns' || data.raise === 'reviewTokens' || data.raise === 'agentTokens') {
-      const raise: Raise = data.raise
-      record.raises = { ...record.raises, [raise]: record.raises[raise] + RAISE_BY[raise] }
+    if (data.raise === 'reviewRuns') {
+      record.raises = { ...record.raises, reviewRuns: record.raises.reviewRuns + RAISE_BY.reviewRuns }
+      await keep($)
+    }
+    const raised = (data.raise as { model?: unknown } | undefined)?.model
+    if (typeof raised === 'string') {
+      record.raises = { ...record.raises, models: { ...record.raises.models, [raised]: (record.raises.models[raised] ?? 0) + RAISE_BY.model } }
       await keep($)
     }
     if (typeof data.toggle === 'string' && (GATES as readonly string[]).includes(data.toggle)) {

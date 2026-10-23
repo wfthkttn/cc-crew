@@ -305,7 +305,7 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
       { provider: 'claude-p', key: 'claude-p-default', status: 'running', dir: '/c/runs/r1/claude-p-default', startedAt: 0 },
     ],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, limits: { reviewRuns: 9, reviewTokens: 9, agentTokens: 9 } }
+  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, limits: { reviewRuns: 9, modelDefault: 9, models: {} } }
   const alert = async (_: unknown, provider: string, detail: string) => {
     io.notified.push(`${provider}: ${detail}`)
     return undefined
@@ -343,7 +343,7 @@ test('a running Codex reviewer stopped from the tab is killed and reads as stopp
     helpers: false,
     reviewers: [reviewer('codex-default'), reviewer('codex-default-2')],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, limits: { reviewRuns: 9, reviewTokens: 9, agentTokens: 9 } }
+  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, limits: { reviewRuns: 9, modelDefault: 9, models: {} } }
   const done = execute(io, r, settings, 'SYS', 'TASK', '/c', async () => undefined, new Map())
   for (let i = 0; i < 10_000 && io.spawned.length < 2; i++) await Promise.resolve()
   expect(stopReviewer('r2', 'codex-default')).toBe(true)
@@ -398,11 +398,19 @@ test('the Claude reviewer is held by its own gate on every Read and Bash', () =>
 })
 
 test("a reviewer runs its provider's configured model and effort unless the call names its own; empty settings leave the tool's default", () => {
-  const s = settingsFrom({ codex_bin: 'codex', agy_bin: 'agy', reviewers: ['codex'], codex_model: '', codex_effort: 'medium', agy_model: 'gemini-4-argon-high', agy_effort: '', claude_model: 'opus', reviewer_rules: [], timeout_s: 900 })
+  const s = settingsFrom({ codex_bin: 'codex', agy_bin: 'agy', reviewers: ['codex'], codex_model: '', codex_effort: 'medium', agy_model: 'gemini-4-argon-high', agy_effort: '', claude_model: 'opus', reviewer_rules: [], timeout_s: 900, model_limits: [] })
   expect(withDefaults({ provider: 'codex' }, s.defaults)).toEqual({ provider: 'codex', effort: 'medium' })
   expect(withDefaults({ provider: 'codex', effort: 'xhigh' }, s.defaults)).toEqual({ provider: 'codex', effort: 'xhigh' })
   expect(withDefaults({ provider: 'antigravity' }, s.defaults)).toEqual({ provider: 'antigravity', model: 'gemini-4-argon-high' })
   expect(withDefaults({ provider: 'claude', model: 'haiku' }, s.defaults)).toEqual({ provider: 'claude', model: 'haiku' })
   expect(withDefaults({ provider: 'claude' }, s.defaults)).toEqual({ provider: 'claude', model: 'opus' })
   expect(withDefaults({ provider: 'claude-p' }, s.defaults)).toEqual({ provider: 'claude-p' })
+})
+
+test('per-model limits in settings read as tokens by limit name; a malformed one stops the load naming it', () => {
+  const base = { codex_bin: 'codex', agy_bin: 'agy', reviewers: [], codex_model: '', codex_effort: '', agy_model: '', agy_effort: '', claude_model: '', reviewer_rules: [], timeout_s: 900 }
+  const s = settingsFrom({ ...base, limit_review_runs: 20, limit_model_tokens: 10_000_000, model_limits: ['claude opus=5M', 'codex default = 2.5k', 'agy gemini-3.8-flash=30000000'] })
+  expect(s.limits).toEqual({ reviewRuns: 20, modelDefault: 10_000_000, models: { 'claude opus': 5_000_000, 'codex default': 2_500, 'agy gemini-3.8-flash': 30_000_000 } })
+  expect(() => settingsFrom({ ...base, model_limits: ['claude opus 5M'] })).toThrow('model limit "claude opus 5M"')
+  expect(() => settingsFrom({ ...base, model_limits: ['=5M'] })).toThrow('is not <model>=<tokens>')
 })

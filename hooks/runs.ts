@@ -5,6 +5,7 @@ import * as claude from './claude.ts'
 import * as codex from './codex.ts'
 import type { Provider, Settings } from './config.ts'
 import type { FollowUp, Job, Outcome, Preflight, Status } from './job.ts'
+import { sum } from './limits.ts'
 import { renderFindings } from './prompt.ts'
 import { type Tokens, tokensOf } from './usage.ts'
 
@@ -21,7 +22,7 @@ export type ReviewerState = ReviewerSpec & {
   dir: string
   report?: string
   findings?: number
-  /** What its last turn spent, as its provider reported it. */
+  /** What its turns spent, follow-ups included, as its provider reported each. */
   tokens?: Tokens
   startedAt: number
   endedAt?: number
@@ -179,7 +180,7 @@ function apply(r: ReviewerState, o: Outcome, endedAt: number): void {
   if (o.continueId !== undefined) r.continueId = o.continueId
   if (o.findings !== undefined) r.findings = o.findings.findings.length
   const tokens = tokensOf(r.provider, o.usage)
-  if (tokens !== undefined) r.tokens = tokens
+  if (tokens !== undefined) r.tokens = r.tokens === undefined ? tokens : sum([r.tokens, tokens])
 }
 
 /** Tells the person a provider needs them; answers why the message failed, or undefined. */

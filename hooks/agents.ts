@@ -1,5 +1,6 @@
 import type { AgentInfo, AgentStatus } from 'claude-code'
 
+import { sum } from './limits.ts'
 import type { Tokens } from './usage.ts'
 
 /** One agent Claude started in this session: an Agent tool subagent, or one agent of a workflow run. */
@@ -21,11 +22,6 @@ export type ClaudeAgent = {
 }
 
 export const LIVE: readonly AgentStatus[] = ['pending', 'running', 'waiting']
-
-function add(a: Tokens | undefined, b: Tokens): Tokens {
-  if (a === undefined) return b
-  return { in: a.in + b.in, cached: a.cached + b.cached, out: a.out + b.out }
-}
 
 /** Claude's own agents of this load, newest last; crew's reviewers are not among them. */
 export class ClaudeAgents {
@@ -51,7 +47,7 @@ export class ClaudeAgents {
     if (a === undefined) return false
     a.status = isAnswer ? 'completed' : 'failed'
     a.endedAt = at
-    if (tokens !== undefined) a.tokens = add(a.tokens, tokens)
+    if (tokens !== undefined) a.tokens = a.tokens === undefined ? tokens : sum([a.tokens, tokens])
     return true
   }
 

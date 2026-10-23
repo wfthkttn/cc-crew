@@ -13,8 +13,8 @@ export type Settings = {
   defaults: Partial<Record<Provider, Choice>>
   reviewerRules: string[]
   timeoutMs: number
-  /** Each session's limits before the Limits tab raises them. */
-  limits: { reviewRuns: number; reviewTokens: number; agentTokens: number }
+  /** Each session's limits before the Limits tab raises them; `models` by limit name, others get `modelDefault`. */
+  limits: { reviewRuns: number; modelDefault: number; models: Record<string, number> }
 }
 
 export function isProvider(name: string): name is Provider {
@@ -39,6 +39,19 @@ function choice(model: unknown, effort: unknown): Choice {
   }
 }
 
+const SCALE: Record<string, number> = { '': 1, k: 1_000, m: 1_000_000 }
+
+/** `claude opus=5M` as its name and tokens. */
+function modelLimitOf(entry: string): [string, number] {
+  const at = entry.lastIndexOf('=')
+  const amount = /^\s*(\d+(?:\.\d+)?)\s*([kKmM]?)\s*$/.exec(entry.slice(at + 1))
+  const name = entry.slice(0, at).trim()
+  if (at < 0 || name === '' || amount === null) {
+    throw new Error(`crew: model limit "${entry}" in settings is not <model>=<tokens>, e.g. "claude opus=5M"`)
+  }
+  return [name, Math.round(Number(amount[1]) * SCALE[amount[2]!.toLowerCase()]!)]
+}
+
 export function settingsFrom(options: PluginOptions): Settings {
   const reviewers = options.reviewers as readonly string[]
   const unknown = reviewers.filter(r => !isProvider(r))
@@ -58,8 +71,8 @@ export function settingsFrom(options: PluginOptions): Settings {
     timeoutMs: (options.timeout_s as number) * 1000,
     limits: {
       reviewRuns: options.limit_review_runs as number,
-      reviewTokens: options.limit_review_tokens as number,
-      agentTokens: options.limit_agent_tokens as number,
+      modelDefault: options.limit_model_tokens as number,
+      models: Object.fromEntries((options.model_limits as readonly string[]).map(modelLimitOf)),
     },
   }
 }

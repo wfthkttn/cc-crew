@@ -2,7 +2,8 @@ import type { Gate } from './limits'
 
 export type Tab = 'running' | 'limits' | 'log'
 
-export type Raise = 'reviewRuns' | 'reviewTokens' | 'agentTokens'
+/** What a raise press adds to: the reviews a session may start, or one model's tokens by its limit name. */
+export type Raise = 'reviewRuns' | { model: string }
 
 /** A run or an agent whose details the pop-out shows. */
 export type Target = { run: string } | { agent: string }
@@ -51,10 +52,14 @@ export type LogRow = TokenCells & { time: string; what: string; status: string; 
 
 export type LogProps = { rows: LogRow[]; page: number }
 
-export type LimitRow = { label: string; spent: string; limit: string; raise: Raise; raiseLabel: string }
+/** `isOver`: what is spent reached the limit, so new work on it is refused. */
+export type LimitRow = { label: string; spent: string; limit: string; raise: Raise; raiseLabel: string; isOver: boolean }
 
-/** `isOn` false: the limits below are shown but not enforced; the gates still are. */
-export type LimitsProps = { isOn: boolean; rows: LimitRow[]; gates: { gate: Gate; isOpen: boolean }[] }
+/**
+ * `isOn` false: the limits below are shown but not enforced; the gates still are. `models` are the ones that spent or have
+ * a limit of their own; any other has `modelDefault`.
+ */
+export type LimitsProps = { isOn: boolean; reviews: LimitRow; models: LimitRow[]; modelDefault: string; gates: { gate: Gate; isOpen: boolean }[] }
 
 export type OverviewProps = {
   tab: Tab

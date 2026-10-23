@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-import type { LimitsProps, LogProps, OverviewAction, OverviewProps, RunningProps, Tab } from './overview-props'
+import type { LimitRow, LimitsProps, LogProps, OverviewAction, OverviewProps, RunningProps, Tab } from './overview-props'
 
 export const OVERVIEW_COLUMNS = 64
 
@@ -12,6 +12,8 @@ const BUTTON = '#24324a'
 const BUTTON_HOVER = '#33496b'
 const STOP = '#5a2a2a'
 const STOP_HOVER = '#7a3434'
+/** A limit that is reached. */
+const OVER = '#e06c75'
 
 /** A run of text; `isPill` marks a button's cells, which draw on a fill; a plain segment with an action (a tab) brightens under the pointer. */
 type Segment = { text: string; color?: string; bold?: boolean; action?: OverviewAction; isPill?: boolean; isStop?: boolean; isEnd?: boolean }
@@ -193,17 +195,27 @@ function logLines(props: LogProps, rows: number, opened: OverviewProps['opened']
   return [...lines, nav]
 }
 
+/** Room for a limit name such as `agy gemini-3.8-flash`. */
+const LIMIT_LABEL_COLUMNS = 24
+/** The limit beside what was spent: `10M`, `20 runs`. */
+const LIMIT_COLUMNS = 10
+
 function limitsLines(props: LimitsProps): Line[] {
   const on: Line = [
     { text: fit('Limits', 15), color: TEXT, bold: true },
     ...pill(props.isOn ? '● on' : '○ off', { switchLimits: true }, !props.isOn),
     { text: props.isOn ? '' : '  nothing below is enforced', color: MUTED },
   ]
-  const rows: Line[] = props.rows.map(r => [
-    { text: fit(r.label, 15), color: TEXT, bold: true },
-    { text: fit(`${r.spent} / ${r.limit}`, 33), color: MUTED },
+  const row = (r: LimitRow, labelColor: string): Line => [
+    { text: fit(r.label, LIMIT_LABEL_COLUMNS), color: r.isOver ? OVER : labelColor },
+    { text: right(r.spent, 6) + ' / ', color: r.isOver ? OVER : MUTED },
+    { text: fit(r.limit, LIMIT_COLUMNS), color: MUTED },
     ...pill(r.raiseLabel, { raise: r.raise }),
-  ])
+  ]
+  const models: Line[] =
+    props.models.length === 0
+      ? [muted(`Nothing ran on a model yet; each may spend ${props.modelDefault}.`)]
+      : props.models.map(r => row(r, TEXT))
   const gates: Line = [
     { text: fit('Allowed', 15), color: TEXT, bold: true },
     ...props.gates.flatMap(g => [...pill(`${g.isOpen ? '●' : '○'} ${g.gate}`, { toggle: g.gate }, !g.isOpen), { text: ' ' }]),
@@ -211,12 +223,18 @@ function limitsLines(props: LimitsProps): Line[] {
   return [
     on,
     [{ text: '' }],
-    ...rows,
+    row(props.reviews, TEXT),
+    [{ text: '' }],
+    heading('Weighted tokens by model'),
+    ...models,
     [{ text: '' }],
     gates,
     [{ text: '' }],
-    muted('Tokens: new input plus output; cache reads are not counted.'),
-    muted('Raises and switches hold for this session; defaults in /config.'),
+    muted('Weighted tokens, as API prices weigh them: new input 1,'),
+    muted('cache reads 0.1, cache writes 1.25, output 5. Reviewers and'),
+    muted(`Claude's agents on one model share its limit; one not listed`),
+    muted(`may spend ${props.modelDefault}. Raises and switches hold for this session;`),
+    muted('defaults in /config.'),
   ]
 }
 

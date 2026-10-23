@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { type ClaudeAgent, ClaudeAgents } from '../hooks/agents.ts'
 import { wrap } from '../hooks/detail.ts'
-import { agentRefusal, followUpRefusal, fresh, reviewRefusal } from '../hooks/limits.ts'
+import { agentRefusal, claudeModel, followUpRefusal, reviewerModel, reviewRefusal, sum, weighted } from '../hooks/limits.ts'
 import { OVERVIEW_COLUMNS, actionAt, logPageSize, overviewLines } from '../hooks/overview.ts'
 import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { emptyRecord } from '../hooks/record.ts'
@@ -27,11 +27,18 @@ test("each provider's usage reads as tokens in (cache included) and out", () => 
   expect(tokensOf('claude', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20, model: 'x' })).toEqual({
     in: 130,
     cached: 100,
+    written: 20,
     out: 5,
   })
   expect(tokensOf('codex', undefined)).toBe(undefined)
   expect([shortCount(950), shortCount(8400), shortCount(1_154_303)]).toEqual(['950', '8k', '1.2M'])
-  expect(fresh({ in: 900, cached: 600, out: 40 })).toBe(340)
+})
+
+test('a limit counts tokens as API prices weigh them: new input 1, cache reads 0.1, cache writes 1.25, output 5', () => {
+  expect(weighted({ in: 900, cached: 600, out: 40 })).toBe(300 + 60 + 200)
+  expect(weighted({ in: 130, cached: 100, written: 20, out: 5 })).toBe(10 + 10 + 25 + 25)
+  expect(weighted(undefined)).toBe(0)
+  expect(sum([{ in: 1, cached: 0, out: 1 }, { in: 2, cached: 1, written: 1, out: 0 }])).toEqual({ in: 3, cached: 1, written: 1, out: 1 })
 })
 
 const AT = new Date(2026, 9, 23, 20, 7).getTime()
@@ -62,8 +69,8 @@ function run(id: string, statuses: ('running' | 'ok' | 'stopped')[], over: Parti
 }
 
 const AGENTS: ClaudeAgent[] = [
-  { id: 'a1', type: 'Explore', description: 'find the parser', startedAt: AT + 60_000, status: 'running' },
-  { id: 'a2', type: 'general-purpose', description: 'review:bugs', workflow: 'wf_1', startedAt: AT + 30_000, endedAt: AT + 90_000, status: 'completed', tokens: { in: 50_000, cached: 40_000, out: 2_000 } },
+  { id: 'a1', type: 'Explore', description: 'find the parser', model: 'claude-sonnet-5-5', startedAt: AT + 60_000, status: 'running' },
+  { id: 'a2', type: 'general-purpose', description: 'review:bugs', workflow: 'wf_1', model: 'claude-opus-5-5', startedAt: AT + 30_000, endedAt: AT + 90_000, status: 'completed', tokens: { in: 50_000, cached: 40_000, out: 2_000 } },
 ]
 
 function props(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = null): OverviewProps {
@@ -76,7 +83,7 @@ function props(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = 
     sessionRuns: [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])],
     agents: AGENTS,
     record: { ...emptyRecord(), turns: 7, main: { in: 1_200_000, cached: 1_000_000, out: 30_000 } },
-    limits: { reviewRuns: 20, reviewTokens: 10_000_000, agentTokens: 20_000_000 },
+    limits: { reviewRuns: 20, modelDefault: 10_000_000, models: {} },
   })
 }
 
@@ -135,19 +142,32 @@ test('Log pages when it runs past the drawer, its header on every page', () => {
   expect(last.at(-1)).toContain('page 2 of 2')
 })
 
-test('Limits: an on switch, spend against each limit with a raise button, and a switch per gate', () => {
+test('Limits: an on switch, reviews against their limit, each model that ran against its own, and a switch per gate', () => {
   const p = props('limits')
   const lines = text(p)
   expect(lines[2]).toContain('▐● on▌')
   expect(actionAt(p, lines[2]!.indexOf('on'), 2)).toEqual({ switchLimits: true })
-  expect(lines[4]).toContain('2 / 20 runs')
-  expect(lines[4]).toContain('▐+10 runs▌')
-  expect(lines[6]).toContain('12k / 20M tokens')
-  expect(lines[8]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● agents▌')
+  expect(lines[4]).toMatch(/^Reviews +2 \/ 20 runs +▐\+10 runs▌/)
+  expect(lines[6]).toStartWith('Weighted tokens by model')
+  expect(lines[7]).toMatch(/^claude opus +25k \/ 10M +▐\+20M▌/)
+  expect(lines[8]).toMatch(/^claude sonnet +0 \/ 10M/)
+  expect(lines[9]).toMatch(/^codex default +560 \/ 10M/)
+  expect(lines[11]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● agents▌')
   expect(actionAt(p, lines[4]!.indexOf('+10'), 4)).toEqual({ raise: 'reviewRuns' })
-  expect(actionAt(p, lines[8]!.indexOf('agents'), 8)).toEqual({ toggle: 'agents' })
+  expect(actionAt(p, lines[7]!.indexOf('+20M'), 7)).toEqual({ raise: { model: 'claude opus' } })
+  expect(actionAt(p, lines[11]!.indexOf('agents'), 11)).toEqual({ toggle: 'agents' })
   expect(actionAt(p, 1, 0)).toEqual({ tab: 'running' })
   expect(actionAt(p, lines[0]!.indexOf('Log'), 0)).toEqual({ tab: 'log' })
+})
+
+test('a limit is named by quota and model: Claude ids fold to their family, an Antigravity id drops its effort', () => {
+  expect(reviewerModel('claude', 'opus')).toBe('claude opus')
+  expect(reviewerModel('claude', 'claude-opus-5-5')).toBe('claude opus')
+  expect(claudeModel('claude-fable-5-1[1m]')).toBe('claude fable')
+  expect(reviewerModel('antigravity', 'gemini-3.8-flash-high')).toBe('agy gemini-3.8-flash')
+  expect(reviewerModel('antigravity', 'claude-opus-5-5-high')).toBe('agy claude-opus-5-5')
+  expect(reviewerModel('codex', undefined)).toBe('codex default')
+  expect(reviewerModel('codex', 'gpt-6.1-sol')).toBe('codex gpt-6.1-sol')
 })
 
 test("a run's and an agent's details: when, how it went, what it spent, then the brief or the prompt", () => {
@@ -163,19 +183,27 @@ test("a run's and an agent's details: when, how it went, what it spent, then the
   expect(agent).toMatch(/── Prompt ──\nFind bugs\.$/)
 })
 
-test('a review is refused when its provider is off or the session is past a limit; raises lift it', () => {
+test('work on a model is refused once the model is past its limit, reviewers and agents counted together; raises and the switch lift it', () => {
   const runs = [run('r1', ['ok', 'ok']), run('r2', ['ok', 'ok'])]
   const spent = spentOf(runs, AGENTS)
-  expect(spent).toEqual({ reviewRuns: 2, reviewTokens: 4 * 340, agentTokens: 12_000 })
-  const base = { reviewRuns: 2, reviewTokens: 10_000_000, agentTokens: 10_000 }
-  expect(reviewRefusal(limitsOf(base, emptyRecord()), spent, ['codex'])).toContain('this session ran 2 reviews, its limit is 2')
-  const raised = { ...emptyRecord(), raises: { reviewRuns: 10, reviewTokens: 0, agentTokens: 10_000 } }
-  expect(reviewRefusal(limitsOf(base, raised), spent, ['codex'])).toBe(undefined)
-  expect(reviewRefusal(limitsOf(base, { ...raised, closed: ['antigravity'] }), spent, ['codex', 'antigravity'])).toContain('antigravity reviewers are switched off')
-  expect(followUpRefusal(limitsOf(base, emptyRecord()), spent, 'codex')).toBe(undefined)
-  expect(agentRefusal(limitsOf(base, emptyRecord()), spent)).toContain("this session's agents spent 12000 tokens (new input + output), the limit is 10000")
-  expect(agentRefusal(limitsOf(base, raised), spent)).toBe(undefined)
-  expect(agentRefusal(limitsOf(base, { ...raised, closed: ['agents'] }), spent)).toContain('switched off')
+  expect(spent).toEqual({ reviewRuns: 2, models: { 'codex default': 2 * 560, 'claude opus': 2 * 560 + 24_000, 'claude sonnet': 0 } })
+  const base = { reviewRuns: 2, modelDefault: 10_000_000, models: { 'claude opus': 10_000 } }
+  const none = emptyRecord()
+  expect(reviewRefusal(limitsOf(base, none), spent, ['codex'], ['codex default'])).toContain('this session ran 2 reviews, its limit is 2')
+  const moreRuns = { ...none, raises: { reviewRuns: 10, models: {} } }
+  expect(reviewRefusal(limitsOf(base, moreRuns), spent, ['codex'], ['codex default'])).toBe(undefined)
+  expect(reviewRefusal(limitsOf(base, moreRuns), spent, ['codex', 'claude'], ['codex default', 'claude opus'])).toContain(
+    'claude opus spent 25120 weighted tokens in this session, its limit is 10000',
+  )
+  expect(reviewRefusal(limitsOf(base, { ...moreRuns, closed: ['antigravity'] }), spent, ['codex', 'antigravity'], [])).toContain('antigravity reviewers are switched off')
+  expect(followUpRefusal(limitsOf(base, none), spent, 'codex', 'codex default')).toBe(undefined)
+  expect(followUpRefusal(limitsOf(base, none), spent, 'claude', 'claude opus')).toContain('claude opus spent 25120')
+  expect(agentRefusal(limitsOf(base, none), spent, 'claude opus')).toContain('claude opus spent 25120')
+  expect(agentRefusal(limitsOf(base, none), spent, 'claude sonnet')).toBe(undefined)
+  const moreOpus = { ...none, raises: { reviewRuns: 0, models: { 'claude opus': 10_000_000 } } }
+  expect(agentRefusal(limitsOf(base, moreOpus), spent, 'claude opus')).toBe(undefined)
+  expect(agentRefusal(limitsOf(base, { ...none, isLimitsOff: true }), spent, 'claude opus')).toBe(undefined)
+  expect(agentRefusal(limitsOf(base, { ...none, closed: ['agents'] }), spent, 'claude sonnet')).toContain('switched off')
 })
 
 test("Claude's agents run until their turn ends and sum what each turn spent; a kept one the engine no longer lists has ended", () => {

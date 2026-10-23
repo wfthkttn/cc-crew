@@ -6,6 +6,8 @@ export type Tokens = {
   in: number
   /** The part of `in` the provider's cache served. */
   cached: number
+  /** The part of `in` written to the cache, where the provider reports it apart (Claude). */
+  written?: number
   /** Every generated token, reasoning included. */
   out: number
   /** The part of `out` spent reasoning, where the provider reports it. */
@@ -39,7 +41,8 @@ export function tokensOf(provider: Provider, raw: unknown): Tokens | undefined {
 /** A Claude turn's usage: input_tokens is only the part neither read from nor written to the cache. */
 export function claudeTokens(u: Record<string, unknown>): Tokens {
   const cached = num(u, 'cache_read_input_tokens')
-  return { in: num(u, 'input_tokens') + cached + num(u, 'cache_creation_input_tokens'), cached, out: num(u, 'output_tokens') }
+  const written = num(u, 'cache_creation_input_tokens')
+  return { in: num(u, 'input_tokens') + cached + written, cached, written, out: num(u, 'output_tokens') }
 }
 
 /** `837k`, `1.2M`, `950`. */

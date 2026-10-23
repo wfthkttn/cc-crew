@@ -1,6 +1,6 @@
 import { type ClaudeAgent, LIVE } from './agents.ts'
 import type { Settings } from './config.ts'
-import { type Limits, type Spent, GATES, fresh, sum } from './limits.ts'
+import { type Limits, type Spent, GATES, claudeModel, modelLimit, reviewerModel, sum, weighted } from './limits.ts'
 import type { LimitsProps, LogProps, LogRow, OverviewProps, ReviewerRow, RunningProps, Tab, Target, TokenCells, TotalRow } from './overview-props.ts'
 import type { SessionRecord } from './record.ts'
 import type { ReviewerState, Run } from './runs.ts'
@@ -158,46 +158,49 @@ export function agentDetail(a: ClaudeAgent, prompt: string, now: number): string
 
 /** The settings' limits with this session's raises and switches. */
 export function limitsOf(base: Settings['limits'], record: SessionRecord): Limits {
+  const named = new Set([...Object.keys(base.models), ...Object.keys(record.raises.models)])
   return {
     isOn: !record.isLimitsOff,
     reviewRuns: base.reviewRuns + record.raises.reviewRuns,
-    reviewTokens: base.reviewTokens + record.raises.reviewTokens,
-    agentTokens: base.agentTokens + record.raises.agentTokens,
+    models: Object.fromEntries([...named].map(m => [m, (base.models[m] ?? base.modelDefault) + (record.raises.models[m] ?? 0)])),
+    modelDefault: base.modelDefault,
     closed: record.closed,
   }
 }
 
+/** A Claude agent's limit name; one kept before agents knew their model has none to tell. */
+export const agentModel = (a: ClaudeAgent) => claudeModel(a.model ?? 'unknown')
+
+/** Every model the session's reviewers and agents ran on, with the tokens spent on it, none spent included. */
 export function spentOf(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[]): Spent {
-  return {
-    reviewRuns: sessionRuns.length,
-    reviewTokens: sessionRuns.flatMap(run => run.reviewers).reduce((n, r) => n + fresh(r.tokens), 0),
-    agentTokens: agents.reduce((n, a) => n + fresh(a.tokens), 0),
-  }
+  const models: Record<string, number> = {}
+  const add = (model: string, t: Tokens | undefined) => (models[model] = (models[model] ?? 0) + weighted(t))
+  for (const r of sessionRuns.flatMap(run => run.reviewers)) add(reviewerModel(r.provider, r.usedModel ?? r.model), r.tokens)
+  for (const a of agents) add(agentModel(a), a.tokens)
+  return { reviewRuns: sessionRuns.length, models }
 }
 
-/** What a raise from the Limits tab adds: the setting's own default size, so one press is one more allowance. */
-export const RAISE_BY = { reviewRuns: 10, reviewTokens: 10_000_000, agentTokens: 20_000_000 } as const
+/** What a raise from the Limits tab adds: the default limit's size, so one press is one more allowance. */
+export const RAISE_BY = { reviewRuns: 10, model: 20_000_000 } as const
 
 export function limitsProps(limits: Limits, spent: Spent): LimitsProps {
+  const named = [...new Set([...Object.keys(spent.models), ...Object.keys(limits.models)])].sort()
   return {
     isOn: limits.isOn,
-    rows: [
-      { label: 'Reviews', spent: String(spent.reviewRuns), limit: `${limits.reviewRuns} runs`, raise: 'reviewRuns', raiseLabel: `+${RAISE_BY.reviewRuns} runs` },
-      {
-        label: '',
-        spent: shortCount(spent.reviewTokens),
-        limit: `${shortCount(limits.reviewTokens)} tokens`,
-        raise: 'reviewTokens',
-        raiseLabel: `+${shortCount(RAISE_BY.reviewTokens)}`,
-      },
-      {
-        label: 'Claude agents',
-        spent: shortCount(spent.agentTokens),
-        limit: `${shortCount(limits.agentTokens)} tokens`,
-        raise: 'agentTokens',
-        raiseLabel: `+${shortCount(RAISE_BY.agentTokens)}`,
-      },
-    ],
+    reviews: {
+      label: 'Reviews',
+      spent: String(spent.reviewRuns),
+      limit: `${limits.reviewRuns} runs`,
+      raise: 'reviewRuns',
+      raiseLabel: `+${RAISE_BY.reviewRuns} runs`,
+      isOver: spent.reviewRuns >= limits.reviewRuns,
+    },
+    models: named.map(model => {
+      const used = spent.models[model] ?? 0
+      const limit = modelLimit(limits, model)
+      return { label: model, spent: shortCount(used), limit: shortCount(limit), raise: { model }, raiseLabel: `+${shortCount(RAISE_BY.model)}`, isOver: used >= limit }
+    }),
+    modelDefault: shortCount(limits.modelDefault),
     gates: GATES.map(gate => ({ gate, isOpen: !limits.closed.includes(gate) })),
   }
 }
