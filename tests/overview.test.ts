@@ -8,7 +8,7 @@ import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { emptyRecord } from '../hooks/record.ts'
 import type { Run } from '../hooks/runs.ts'
 import { shortCount, tokensOf } from '../hooks/usage.ts'
-import { agentDetail, limitsOf, overviewProps, runDetail, spentOf } from '../hooks/views.ts'
+import { agentDetail, badgeOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf } from '../hooks/views.ts'
 
 // Trimmed from live reports, 2026-10-23.
 test("each provider's usage reads as tokens in (cache included) and out", () => {
@@ -204,6 +204,17 @@ test('work on a model is refused once the model is past its limit, reviewers and
   expect(agentRefusal(limitsOf(base, moreOpus), spent, 'claude opus')).toBe(undefined)
   expect(agentRefusal(limitsOf(base, { ...none, isLimitsOff: true }), spent, 'claude opus')).toBe(undefined)
   expect(agentRefusal(limitsOf(base, { ...none, closed: ['agents'] }), spent, 'claude sonnet')).toContain('switched off')
+})
+
+test('the tab badge counts reviewers and agents running plus limits reached, amber once one is', () => {
+  const runs = [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])]
+  const spent = spentOf(runs, AGENTS)
+  const roomy = limitsProps(limitsOf({ reviewRuns: 20, modelDefault: 10_000_000, models: {} }, emptyRecord()), spent)
+  expect(badgeOf(runs, AGENTS, roomy)).toEqual({ count: 2, level: 'info' })
+  const full = { reviewRuns: 2, modelDefault: 10_000_000, models: { 'codex default': 100 } }
+  expect(badgeOf(runs, AGENTS, limitsProps(limitsOf(full, emptyRecord()), spent))).toEqual({ count: 4, level: 'attention' })
+  expect(badgeOf(runs, AGENTS, limitsProps(limitsOf(full, { ...emptyRecord(), isLimitsOff: true }), spent))).toEqual({ count: 2, level: 'info' })
+  expect(badgeOf([], [], roomy)).toEqual({ count: 0, level: 'info' })
 })
 
 test("Claude's agents run until their turn ends and sum what each turn spent; a kept one the engine no longer lists has ended", () => {

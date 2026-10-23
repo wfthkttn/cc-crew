@@ -31,7 +31,7 @@ import {
 import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens } from './usage.ts'
-import { RAISE_BY, agentDetail, limitsOf, overviewProps, runDetail, spentOf } from './views.ts'
+import { type Badge, RAISE_BY, agentDetail, badgeOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf } from './views.ts'
 
 const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
 
@@ -202,9 +202,23 @@ async function open($: EngineInterface, target: Target): Promise<void> {
   await $.sidebar.popout({ id: TAB_ID, isShown: true })
 }
 
+/**
+ * The badge last set, so the tick sets it only on a change: each set rewrites the rail's state. Null until this load
+ * set one: the rail still shows what an earlier load set.
+ */
+let badge: Badge | null = null
+
+async function syncBadge($: EngineInterface): Promise<void> {
+  const next = badgeOf(sessionRuns(), claudeAgents.all(), limitsProps(currentLimits(), currentSpent()))
+  if (badge !== null && next.count === badge.count && next.level === badge.level) return
+  badge = next
+  await $.sidebar.badge({ id: TAB_ID, ...next })
+}
+
 async function tick($: EngineInterface): Promise<void> {
-  if ((await $.sidebar.selected({})) !== TAB_ID) return
   claudeAgents.refresh(await $.agent.list())
+  await syncBadge($)
+  if ((await $.sidebar.selected({})) !== TAB_ID) return
   $.ui.invalidate('ui.render')
 }
 
@@ -458,6 +472,7 @@ export const register: Register = (on, options) => {
     claudeAgents.restore(record.agents, await $.agent.list())
     await loadSessionRuns($)
     await $.sidebar.register(TOOL)
+    await syncBadge($)
     ticker?.cancel()
     ticker = $.clock.every(TICK_MS, () => void tick($))
     return started

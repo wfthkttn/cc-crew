@@ -1,3 +1,5 @@
+import type { SidebarBadgeLevel } from 'sidebar'
+
 import { type ClaudeAgent, LIVE } from './agents.ts'
 import type { Settings } from './config.ts'
 import { type Limits, type Spent, GATES, claudeModel, modelLimit, reviewerModel, sum, weighted } from './limits.ts'
@@ -203,6 +205,16 @@ export function limitsProps(limits: Limits, spent: Spent): LimitsProps {
     modelDefault: shortCount(limits.modelDefault),
     gates: GATES.map(gate => ({ gate, isOpen: !limits.closed.includes(gate) })),
   }
+}
+
+export type Badge = { count: number; level: SidebarBadgeLevel }
+
+/** The tab's badge: reviewers and Claude's agents running now, plus the limits reached; amber once one is. */
+export function badgeOf(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], limits: LimitsProps): Badge {
+  const running = sessionRuns.flatMap(run => run.reviewers).filter(r => r.status === 'running').length
+  const live = agents.filter(a => LIVE.includes(a.status)).length
+  const reached = limits.isOn ? [limits.reviews, ...limits.models].filter(r => r.isOver).length : 0
+  return { count: running + live + reached, level: reached > 0 ? 'attention' : 'info' }
 }
 
 export type ViewInput = {
