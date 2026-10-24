@@ -1,4 +1,4 @@
-import type { SidebarBadgeLevel } from 'sidebar'
+import type { SidebarBadgeLevel } from 'cc-sidebar'
 
 import { type ClaudeAgent, LIVE } from './agents.ts'
 import { type Catalog, costOf, groupOf, modelKey, priceOf } from './catalog.ts'

@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 'sidebar'
+import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 'cc-sidebar'
 
 import { ClaudeAgents } from './agents.ts'
 import { wrap } from './detail.ts'
@@ -557,7 +557,7 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     // crew's own reviewers show under their run and count against the review limits.
-    if (e.subagentType.startsWith('crew:')) return next(e)
+    if (e.subagentType.startsWith('cc-crew:')) return next(e)
     // An agent type with a model of its own is gated on the asked or the parent's: the plugin API does not tell its type's model.
     const refusal = agentRefusal(currentLimits(), currentSpent(), groupFor('claude', e.model ?? e.parentModel))
     if (refusal !== undefined) return { deny: `crew: ${refusal}` }
@@ -665,12 +665,12 @@ export const register: Register = (on, options) => {
     return filled as typeof tree
   })
 
-  on('agent.offer', { agent: 'crew:reviewer' }, () => ({ isOffered: claude.isOffered() }))
-  on('agent.offer', { agent: 'crew:reviewer-web' }, () => ({ isOffered: claude.isOffered() }))
+  on('agent.offer', { agent: 'cc-crew:reviewer' }, () => ({ isOffered: claude.isOffered() }))
+  on('agent.offer', { agent: 'cc-crew:reviewer-web' }, () => ({ isOffered: claude.isOffered() }))
 
-  on('tool.call', { tool: 'mcp__crew__review' }, ($, e, next) => answer(startReview($, fields(e), next.signal)))
-  on('tool.call', { tool: 'mcp__crew__review_continue' }, ($, e, next) => answer(continueReview($, fields(e), next.signal)))
-  on('tool.call', { tool: 'mcp__crew__review_status' }, ($, e) => answer(status($, fields(e))))
+  on('tool.call', { tool: 'mcp__cc-crew__review' }, ($, e, next) => answer(startReview($, fields(e), next.signal)))
+  on('tool.call', { tool: 'mcp__cc-crew__review_continue' }, ($, e, next) => answer(continueReview($, fields(e), next.signal)))
+  on('tool.call', { tool: 'mcp__cc-crew__review_status' }, ($, e) => answer(status($, fields(e))))
 
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     if (e.agentId === undefined) return next(e)
@@ -695,7 +695,7 @@ export const register: Register = (on, options) => {
     return next({ ...e, command, run_in_background: false })
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'crew: the shell guard failed' }))
 
-  on('tool.call', { tool: `mcp__crew__${fileTools.LIST_TOOL}` }, async ($, e) => {
+  on('tool.call', { tool: `mcp__cc-crew__${fileTools.LIST_TOOL}` }, async ($, e) => {
     const f = fields(e)
     const fence = await reviewerFence($, f)
     if (typeof fence === 'string') return { deny: fence }
@@ -705,7 +705,7 @@ export const register: Register = (on, options) => {
     return 'refusal' in listed ? { deny: `crew: ${listed.refusal}` } : { result: listed.text }
   }).catch(($, e, next) => ({ deny: `crew: the listing failed (${next.error.kind}): ${next.error.message}` }))
 
-  on('tool.call', { tool: `mcp__crew__${fileTools.SEARCH_TOOL}` }, async ($, e) => {
+  on('tool.call', { tool: `mcp__cc-crew__${fileTools.SEARCH_TOOL}` }, async ($, e) => {
     const f = fields(e)
     const fence = await reviewerFence($, f)
     if (typeof fence === 'string') return { deny: fence }

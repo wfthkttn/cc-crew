@@ -30,7 +30,7 @@ export function gateCommand(approvedDir: string): string {
 export const approvedMark = (approvedDir: string, toolUseId: string) => join(approvedDir, toolUseId)
 
 /** The tools crew registers for its reviewers to find their way where they have no shell, by their engine names. */
-export const FILE_TOOLS = [`mcp__crew__${LIST_TOOL}`, `mcp__crew__${SEARCH_TOOL}`]
+export const FILE_TOOLS = [`mcp__cc-crew__${LIST_TOOL}`, `mcp__cc-crew__${SEARCH_TOOL}`]
 
 /**
  * `effort` undefined: the reviewers run at the session's effort. `hasShell` false (Windows): crew's own list and
@@ -184,7 +184,7 @@ function arm(io: Io, agentId: string, model: string, fence: Fence, j: Pick<Job, 
  */
 export async function begin(io: Io, j: Job, codexBin: string, description: string): Promise<Pending> {
   const model = j.model ?? DEFAULT_MODEL
-  const spawned = await io.spawnAgent({ subagentType: `crew:${j.web ? AGENT_WEB : AGENT}`, prompt: j.task, description, model })
+  const spawned = await io.spawnAgent({ subagentType: `cc-crew:${j.web ? AGENT_WEB : AGENT}`, prompt: j.task, description, model })
   if (spawned.deny !== undefined || spawned.agentId === undefined) {
     return failed(model, `the reviewer agent did not start: ${spawned.deny ?? 'no agent id'}`)
   }

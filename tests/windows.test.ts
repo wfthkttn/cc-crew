@@ -135,8 +135,8 @@ test("a Claude reviewer's Read on Windows is held to its roots without case and 
 
 test("on Windows the Claude reviewer lists and searches with crew's tools in place of a shell", async () => {
   const [spec, web] = claude.agentSpecs('SYS', 'C:\\c\\approved', undefined, false)
-  expect(spec!.tools).toEqual(['Read', 'mcp__crew__reviewer_list', 'mcp__crew__reviewer_search'])
-  expect(web!.tools).toEqual(['Read', 'mcp__crew__reviewer_list', 'mcp__crew__reviewer_search', 'WebSearch', 'WebFetch'])
+  expect(spec!.tools).toEqual(['Read', 'mcp__cc-crew__reviewer_list', 'mcp__cc-crew__reviewer_search'])
+  expect(web!.tools).toEqual(['Read', 'mcp__cc-crew__reviewer_list', 'mcp__cc-crew__reviewer_search', 'WebSearch', 'WebFetch'])
   expect(claude.agentSpecs('SYS', '/c/approved', undefined, true)[0]!.tools).toEqual(['Read', 'Bash'])
   expect(claude.approvedMark('C:\\c\\approved', 'toolu_1')).toBe('C:\\c\\approved\\toolu_1')
 })
