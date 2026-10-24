@@ -4,6 +4,7 @@ import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 's
 import { ClaudeAgents } from './agents.ts'
 import { wrap } from './detail.ts'
 import { type ChangeSpec, changeOf } from './changes.ts'
+import { homeEnv as agyHomeEnv } from './antigravity.ts'
 import * as claude from './claude.ts'
 import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
@@ -29,7 +30,9 @@ import {
   stopReviewer,
   summary,
 } from './runs.ts'
-import { type ReadSpec, findSecrets, folderOf, isInside, resolveRoots } from './scope.ts'
+import * as fileTools from './files.ts'
+import { type ReadSpec, findSecrets, folderOf, isAbsolute, isInside, isWindowsPath, join, namesOf, resolveRoots } from './scope.ts'
+import { bashUnder } from './shell.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens } from './usage.ts'
 import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf, usageDetail } from './views.ts'
@@ -107,7 +110,9 @@ const STATUS_SCHEMA = {
 let settings: Settings
 let system = REVIEWER_PROMPT
 let cacheDir = ''
-const approvedDir = () => `${cacheDir}/approved`
+/** Set at session start. */
+let isWindows = false
+const approvedDir = () => join(cacheDir, 'approved')
 
 const TAB_ID = 'crew'
 const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
@@ -297,12 +302,13 @@ function changesOf(f: Fields): ChangeSpec | undefined {
 }
 
 function reportBase(f: Fields, project: string): string {
-  const work = `${project}/.claude/work`
+  const work = join(join(project, '.claude'), 'work')
   const v = f.report_dir
-  if (v === undefined) return `${work}/reviews`
+  if (v === undefined) return join(work, 'reviews')
   if (typeof v !== 'string') throw new BadInput('report_dir must be a path')
-  const path = (v.startsWith('/') ? v : `${project}/${v}`).replace(/\/+$/, '')
-  if (path.split('/').includes('..') || !isInside(path, work)) throw new BadInput(`report_dir must be under ${work}`)
+  const given = isAbsolute(v) ? v : join(project, v)
+  const path = isWindowsPath(given) ? given.replace(/[\\/]+$/, '') : given.replace(/\/+$/, '')
+  if (namesOf(path).includes('..') || !isInside(path, work)) throw new BadInput(`report_dir must be under ${work}`)
   return path
 }
 
@@ -321,8 +327,26 @@ async function writeFile($: EngineInterface, path: string, text: string): Promis
     await $.fs.write(piece, text.slice(at, at + WRITE_PIECE))
     pieces.push(piece)
   }
-  const joined = await $.process.run(['sh', '-c', 'out="$1"; shift; cat -- "$@" > "$out" && rm -- "$@"', 'sh', path, ...pieces])
+  const joined = await $.process.run([(await gitBashOf($)) ?? 'sh', '-c', 'out="$1"; shift; cat -- "$@" > "$out" && rm -- "$@"', 'sh', path, ...pieces])
   if (joined.exitCode !== 0) throw new Error(`crew: could not join ${pieces.length} pieces into ${path} (exit ${joined.exitCode}): ${joined.stderr.trim()}`)
+}
+
+let gitBash: string | null = null
+
+/**
+ * Git Bash on Windows, for crew's own shell scripts: there `sh` and `bash` are on PATH only in a session started from
+ * Git Bash, and Claude Code needs Git for Windows anyway. Null elsewhere, where the shell on PATH runs them.
+ */
+async function gitBashOf($: EngineInterface): Promise<string | null> {
+  if (!isWindows) return null
+  if (gitBash !== null) return gitBash
+  const given = await $.env.get('CLAUDE_CODE_GIT_BASH_PATH')
+  if (given !== undefined && given !== '') return (gitBash = given)
+  const git = await $.process.run(['git', '--exec-path'], { timeoutMs: 10_000 })
+  if (git.exitCode !== 0) throw new Error(`crew: no Git Bash: git --exec-path failed (exit ${git.exitCode}): ${git.stderr.trim()}`)
+  const found = bashUnder(git.stdout.trim())
+  if (!(await $.fs.exists(found))) throw new Error(`crew: no Git Bash at ${found}, where git's exec path puts it`)
+  return (gitBash = found)
 }
 
 function ioOf($: EngineInterface): Io {
@@ -448,7 +472,7 @@ async function status($: EngineInterface, f: Fields): Promise<string> {
   if (lines.length === 0) lines.push('No crew reviews in this session.')
   let agyQuota: string
   try {
-    const quota = await runChild(io, { argv: [settings.agyBin, '-p', '/quota'], env: { HOME: `${cacheDir}/agy-home` } }, { timeoutMs: 20_000 })
+    const quota = await runChild(io, { argv: [settings.agyBin, '-p', '/quota'], env: agyHomeEnv(join(cacheDir, 'agy-home')) }, { timeoutMs: 20_000 })
     agyQuota = quota.ended.kind === 'exited' && quota.ended.code === 0 ? quota.stdout.trim() : `unavailable (${describeEnd(quota)})`
   } catch (err) {
     agyQuota = `unavailable: ${settings.agyBin} did not run (${String(err)})`
@@ -460,6 +484,15 @@ async function status($: EngineInterface, f: Fields): Promise<string> {
 
 function fields(e: unknown): Fields {
   return e as Fields
+}
+
+/** The fence of the crew reviewer making the call, or why the call is refused: the file tools are theirs alone. */
+async function reviewerFence($: EngineInterface, f: Fields): Promise<claude.Fence | string> {
+  if (typeof f.agentId !== 'string') return "crew: this tool is for crew's reviewers only"
+  const fence = await claude.fenceFor(ioOf($), f.agentId)
+  if (fence === 'not-ours') return "crew: this tool is for crew's reviewers only"
+  if (fence === undefined) return 'crew: this reviewer has no read limits in place'
+  return fence
 }
 
 function answer(work: Promise<string>) {
@@ -476,11 +509,16 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     const home = await $.env.get('HOME')
     if (home === undefined) throw new Error('crew: HOME is not set, so its cache folder is unknown')
-    cacheDir = `${home}/.cache/crew`
+    isWindows = (await $.env.get('OS')) === 'Windows_NT'
+    cacheDir = join(join(home, '.cache'), 'crew')
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
-    for (const spec of claude.agentSpecs(system, approvedDir(), settings.defaults.claude?.effort)) await $.agent.register(spec)
+    for (const spec of claude.agentSpecs(system, approvedDir(), settings.defaults.claude?.effort, !isWindows)) await $.agent.register(spec)
     await $.tool.register({ name: 'review', description: REVIEW_DESCRIPTION, inputSchema: REVIEW_SCHEMA, isDeferred: false })
+    if (isWindows) {
+      await $.tool.register({ name: fileTools.LIST_TOOL, description: fileTools.LIST_DESCRIPTION, inputSchema: fileTools.LIST_SCHEMA })
+      await $.tool.register({ name: fileTools.SEARCH_TOOL, description: fileTools.SEARCH_DESCRIPTION, inputSchema: fileTools.SEARCH_SCHEMA })
+    }
     await $.tool.register({
       name: 'review_continue',
       description: 'Ask a reviewer of a finished crew review a follow-up, in its own conversation. Background by default: the answer arrives as a message.',
@@ -495,7 +533,7 @@ export const register: Register = (on, options) => {
     catalog = files
     catalogNote = null
     $.clock.after(0, () =>
-      void readCodexCatalog(ioOf($), settings.codexBin).then(
+      void gitBashOf($).then(bash => readCodexCatalog(ioOf($), settings.codexBin, bash ?? 'bash')).then(
         codex => {
           catalog = withCodex(files, codex)
           $.ui.invalidate('ui.render')
@@ -650,14 +688,34 @@ export const register: Register = (on, options) => {
     const fence = await claude.fenceFor(ioOf($), e.agentId)
     if (fence === 'not-ours') return next(e)
     if (fence === undefined) return { deny: 'crew: this reviewer has no read limits in place' }
+    if (isWindows) return { deny: 'crew: a reviewer has no shell on Windows; it lists and searches with its own tools' }
     const command = claude.fencedCommand(fence, e.command)
     if (command === undefined) return { deny: 'crew: this review may read nothing on disk' }
     await $.fs.write(claude.approvedMark(approvedDir(), e.tool_use_id), '')
     return next({ ...e, command, run_in_background: false })
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'crew: the shell guard failed' }))
 
+  on('tool.call', { tool: `mcp__crew__${fileTools.LIST_TOOL}` }, async ($, e) => {
+    const f = fields(e)
+    const fence = await reviewerFence($, f)
+    if (typeof fence === 'string') return { deny: fence }
+    if (typeof f.path !== 'string') return { deny: 'crew: path must be a string' }
+    const depth = typeof f.depth === 'number' ? f.depth : undefined
+    const listed = await fileTools.listing(ioOf($), fence, f.path, depth)
+    return 'refusal' in listed ? { deny: `crew: ${listed.refusal}` } : { result: listed.text }
+  }).catch(($, e, next) => ({ deny: `crew: the listing failed (${next.error.kind}): ${next.error.message}` }))
+
+  on('tool.call', { tool: `mcp__crew__${fileTools.SEARCH_TOOL}` }, async ($, e) => {
+    const f = fields(e)
+    const fence = await reviewerFence($, f)
+    if (typeof fence === 'string') return { deny: fence }
+    if (typeof f.pattern !== 'string' || typeof f.path !== 'string') return { deny: 'crew: pattern and path must be strings' }
+    const found = await fileTools.search(ioOf($), fence, { pattern: f.pattern, path: f.path, ignoreCase: f.ignore_case === true })
+    return 'refusal' in found ? { deny: `crew: ${found.refusal}` } : { result: found.text }
+  }).catch(($, e, next) => ({ deny: `crew: the search failed (${next.error.kind}): ${next.error.message}` }))
+
   on('tool.check', async ($, e, next) => {
-    if (e.agentId === undefined || (e.tool !== 'Read' && e.tool !== 'Bash')) return next(e)
+    if (e.agentId === undefined || (e.tool !== 'Read' && e.tool !== 'Bash' && !claude.FILE_TOOLS.includes(e.tool))) return next(e)
     if (!claude.fences.has(e.agentId)) return next(e)
     return { decision: 'allow', reason: 'crew: a fenced reviewer call' }
   })

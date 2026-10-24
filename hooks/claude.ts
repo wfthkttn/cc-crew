@@ -3,7 +3,8 @@ import type { Io } from './io.ts'
 import { profile } from './codex.ts'
 import type { FollowUp, Job, Outcome } from './job.ts'
 import { parseFindings } from './prompt.ts'
-import { SECRET_NAME, isInside, parentOf, workFolder } from './scope.ts'
+import { LIST_TOOL, SEARCH_TOOL } from './files.ts'
+import { isInside, isSecretPath, join, parentOf, pathKey, workFolder } from './scope.ts'
 
 export const AGENT = 'reviewer'
 export const AGENT_WEB = 'reviewer-web'
@@ -26,10 +27,16 @@ export function gateCommand(approvedDir: string): string {
   ].join('; ')
 }
 
-export const approvedMark = (approvedDir: string, toolUseId: string) => `${approvedDir}/${toolUseId}`
+export const approvedMark = (approvedDir: string, toolUseId: string) => join(approvedDir, toolUseId)
 
-/** `effort` undefined: the reviewers run at the session's effort. */
-export function agentSpecs(system: string, approvedDir: string, effort: string | undefined) {
+/** The tools crew registers for its reviewers to find their way where they have no shell, by their engine names. */
+export const FILE_TOOLS = [`mcp__crew__${LIST_TOOL}`, `mcp__crew__${SEARCH_TOOL}`]
+
+/**
+ * `effort` undefined: the reviewers run at the session's effort. `hasShell` false (Windows): crew's own list and
+ * search tools stand in for Bash.
+ */
+export function agentSpecs(system: string, approvedDir: string, effort: string | undefined, hasShell: boolean) {
   const base = {
     prompt: system,
     omitClaudeMd: true as const,
@@ -37,13 +44,14 @@ export function agentSpecs(system: string, approvedDir: string, effort: string |
     ...(effort === undefined ? {} : { effort }),
     hooks: { PreToolUse: [{ matcher: 'Read|Bash', hooks: [{ type: 'command', command: gateCommand(approvedDir) }] }] },
   }
+  const tools = hasShell ? ['Read', 'Bash'] : ['Read', ...FILE_TOOLS]
   return [
-    { ...base, name: AGENT, description: 'Read-only reviewer run by the crew review tool', tools: ['Read', 'Bash'] },
+    { ...base, name: AGENT, description: 'Read-only reviewer run by the crew review tool', tools },
     {
       ...base,
       name: AGENT_WEB,
       description: 'Read-only reviewer with web access run by the crew review tool',
-      tools: ['Read', 'Bash', 'WebSearch', 'WebFetch'],
+      tools: [...tools, 'WebSearch', 'WebFetch'],
     },
   ]
 }
@@ -95,8 +103,7 @@ export async function readRefusal(io: Io, fence: Fence, path: string): Promise<s
   const real = stat?.realPath
   if (real === undefined) return `${path} does not resolve`
   if (!fence.roots.some(r => isInside(real, r))) return `${path} is outside the paths this review may read`
-  const name = real.slice(real.lastIndexOf('/') + 1)
-  if (SECRET_NAME.test(name) || fence.secrets.includes(real)) return `${path} is a secret file`
+  if (isSecretPath(real) || fence.secrets.some(s => pathKey(s) === pathKey(real))) return `${path} is a secret file`
   return undefined
 }
 

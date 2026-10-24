@@ -62,17 +62,26 @@ const CODEX_SCRIPT = [
   `printf '%s\\n' '{"method":"initialize","id":0,"params":{"clientInfo":{"name":"crew","version":"0.1.0"}}}' '{"method":"initialized"}' '{"method":"model/list","id":1,"params":{}}' '{"method":"account/rateLimits/read","id":2}' >&"\${C[1]}"`,
   'seen=0',
   'while IFS= read -r line <&"${C[0]}"; do',
-  `  case $line in '{"id":1,'*|'{"id":2,'*) printf '%s\\n' "$line"; seen=$((seen + 1)); [ $seen -eq 2 ] && break ;; esac`,
+  // an answer may name its id after its result or error
+  `  case $line in '{"id":1,'*|*',"id":1}'|'{"id":2,'*|*',"id":2}') printf '%s\\n' "$line"; seen=$((seen + 1)); [ $seen -eq 2 ] && break ;; esac`,
   'done',
   'kill "$C_PID" 2>/dev/null',
 ].join('\n')
 
-export async function readCodexCatalog(io: Io, bin: string): Promise<CodexCatalog> {
-  const run = await io.run(['bash', '-c', CODEX_SCRIPT, 'crew', bin], { timeoutMs: 20_000 })
+/** `bash`: the bash to run the script with, Git Bash's on Windows. */
+export async function readCodexCatalog(io: Io, bin: string, bash: string): Promise<CodexCatalog> {
+  const run = await io.run([bash, '-c', CODEX_SCRIPT, 'crew', bin], { timeoutMs: 20_000 })
+  const lines = run.stdout.split('\n').flatMap(l => {
+    if (!l.startsWith('{')) return []
+    try {
+      return [JSON.parse(l) as { id?: unknown; result?: unknown; error?: { message?: string } }]
+    } catch {
+      return []
+    }
+  })
   const answer = (id: number) => {
-    const line = run.stdout.split('\n').find(l => l.startsWith(`{"id":${id},`))
-    if (line === undefined) throw new Error(`no answer ${id} from codex app-server (exit ${run.exitCode}): ${run.stderr.trim().slice(-200)}`)
-    const parsed = JSON.parse(line) as { result?: unknown; error?: { message?: string } }
+    const parsed = lines.find(l => l.id === id)
+    if (parsed === undefined) throw new Error(`no answer ${id} from codex app-server (exit ${run.exitCode}): ${run.stderr.trim().slice(-200)}`)
     if (parsed.error !== undefined) throw new Error(`codex app-server: ${parsed.error.message ?? JSON.stringify(parsed.error)}`)
     return parsed.result
   }

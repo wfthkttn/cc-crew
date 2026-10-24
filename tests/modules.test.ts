@@ -388,9 +388,9 @@ test('secret names cover keys, tokens and cloud credentials', () => {
 })
 
 test('the Claude reviewer is held by its own gate on every Read and Bash', () => {
-  const [spec] = claude.agentSpecs('SYS', '/c/approved', undefined)
+  const [spec] = claude.agentSpecs('SYS', '/c/approved', undefined, true)
   expect('effort' in spec!).toBe(false)
-  expect(claude.agentSpecs('SYS', '/c/approved', 'high').map(s => s.effort)).toEqual(['high', 'high'])
+  expect(claude.agentSpecs('SYS', '/c/approved', 'high', true).map(s => s.effort)).toEqual(['high', 'high'])
   const pre = (spec!.hooks as { PreToolUse: { matcher: string; hooks: { command: string }[] }[] }).PreToolUse
   expect(pre[0]!.matcher).toBe('Read|Bash')
   expect(pre[0]!.hooks[0]!.command).toContain(`'/c/approved'/"$id"`)

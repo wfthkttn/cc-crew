@@ -3,7 +3,7 @@ import type { Io } from './io.ts'
 import type { FollowUp, Job, Outcome, Preflight } from './job.ts'
 import { describeEnd, run } from './proc.ts'
 import { FINDINGS_SCHEMA, parseFindings } from './prompt.ts'
-import { workFolder } from './scope.ts'
+import { isWindowsPath, workFolder } from './scope.ts'
 
 const SECRET_GLOBS = [
   '**/.env',
@@ -64,6 +64,8 @@ function options(bin: string, j: Omit<Job, 'task'>, cwd: string): string[] {
     `developer_instructions=${toml(j.system)}`,
     '-c',
     'project_doc_max_bytes=0',
+    // Windows' default and unelevated sandboxes refuse a read-only profile; MXC runs it with no machine setup
+    ...(isWindowsPath(j.dir) ? ['-c', 'windows.sandbox="mxc"'] : []),
     ...(j.model !== undefined ? ['-m', j.model] : []),
     ...(j.effort !== undefined ? ['-c', `model_reasoning_effort=${toml(j.effort)}`] : []),
     ...(j.helpers ? [] : ['--disable', 'multi_agent']),

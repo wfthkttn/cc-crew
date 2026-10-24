@@ -3,7 +3,7 @@ import type { Io } from './io.ts'
 import type { FollowUp, Job, Outcome, Preflight } from './job.ts'
 import { describeEnd, run } from './proc.ts'
 import { FINDINGS_SCHEMA, parseFindings } from './prompt.ts'
-import { folderOf, siblingsOf } from './scope.ts'
+import { folderOf, isWindowsPath, join, otherDrives, siblingsOf } from './scope.ts'
 
 export const AGENT = 'crew-reviewer'
 
@@ -12,7 +12,10 @@ const QUOTA = /quota|credits balance|RESOURCE_EXHAUSTED|rate limit|usage limit/i
 
 type Paths = { home: string; work: string }
 
-const paths = (stateDir: string): Paths => ({ home: `${stateDir}/home`, work: `${stateDir}/work` })
+const paths = (stateDir: string): Paths => ({ home: join(stateDir, 'home'), work: join(stateDir, 'work') })
+
+/** agy's home: on Windows its home folder comes from USERPROFILE, not HOME. */
+export const homeEnv = (home: string): Record<string, string> => (isWindowsPath(home) ? { HOME: home, USERPROFILE: home } : { HOME: home })
 
 function agentFile(system: string, web: boolean, helpers: boolean): string {
   // No grep_search: it prints lines of files the read_file deny rules close, secret files included.
@@ -39,8 +42,9 @@ function agentFile(system: string, web: boolean, helpers: boolean): string {
  * way down to the read roots and to the reviewer's own working folder.
  */
 async function settings(io: Io, j: Omit<Job, 'task'>, p: Paths): Promise<string> {
-  const siblings = await siblingsOf(io, [...j.roots, p.work])
-  const deny = ['write_file(*)', ...j.secrets.map(s => `read_file(${s})`), ...siblings.map(s => `read_file(${s})`)]
+  const keep = [...j.roots, p.work]
+  const closed = [...(await siblingsOf(io, keep)), ...(await otherDrives(io, keep))]
+  const deny = ['write_file(*)', ...j.secrets.map(s => `read_file(${s})`), ...closed.map(s => `read_file(${s})`)]
   if (!j.web) deny.push('read_url(*)')
   // Headless runs refuse any tool that would ask for approval; a page read asks unless allowed.
   const allow = j.web ? ['read_url(*)'] : []
@@ -54,9 +58,16 @@ async function prepare(io: Io, j: Omit<Job, 'task'>, p: Paths): Promise<void> {
 }
 
 export async function preflight(io: Io, bin: string, home: string): Promise<Preflight> {
+  if (isWindowsPath(home)) {
+    return {
+      ok: false,
+      status: 'failed',
+      detail: "not on Windows yet: nothing has shown that agy's deny rules match Windows paths, and without them its reviewer could read the whole disk",
+    }
+  }
   let r
   try {
-    r = await run(io, { argv: [bin, '-p', '/quota'], env: { HOME: home } }, { timeoutMs: 20_000 })
+    r = await run(io, { argv: [bin, '-p', '/quota'], env: homeEnv(home) }, { timeoutMs: 20_000 })
   } catch (err) {
     return { ok: false, status: 'failed', detail: `agy did not run: ${String(err)}` }
   }
@@ -112,7 +123,7 @@ async function execute(
     ...(j.effort !== undefined ? ['--effort', j.effort] : []),
   ]
   const seen: Seen = { toolErrors: 0 }
-  const r = await run(io, { argv, cwd: p.work, env: { HOME: p.home } }, { timeoutMs: j.timeoutMs, signal: j.signal, onLine: watch(seen) })
+  const r = await run(io, { argv, cwd: p.work, env: homeEnv(p.home) }, { timeoutMs: j.timeoutMs, signal: j.signal, onLine: watch(seen) })
   await io.write(`${j.dir}/events.jsonl`, r.stdout)
   await io.write(`${j.dir}/stderr.txt`, r.stderr)
   const res = seen.result

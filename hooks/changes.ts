@@ -1,6 +1,6 @@
 import type { Io } from './io.ts'
 
-import { SECRET_NAME } from './scope.ts'
+import { isSecretPath, join } from './scope.ts'
 
 export type ChangeSpec = 'uncommitted' | { base: string } | { commit: string }
 
@@ -15,7 +15,8 @@ async function git(io: Io, repo: string, args: string[]): Promise<string> {
   return r.stdout
 }
 
-const isSecret = (path: string) => SECRET_NAME.test(path.slice(path.lastIndexOf('/') + 1))
+/** `path` as git names it, relative to `repo` with `/`. */
+const isSecret = (repo: string, path: string) => isSecretPath(join(repo, path))
 
 const names = (out: string) => out.split('\n').filter(l => l !== '')
 
@@ -29,7 +30,7 @@ export async function changeOf(io: Io, repo: string, spec: ChangeSpec): Promise<
     label = `The uncommitted changes (staged and unstaged) in \`${repo}\``
     range = ['diff', 'HEAD']
     changed = names(await git(io, repo, ['diff', 'HEAD', '--name-only']))
-    untracked = names(await git(io, repo, ['ls-files', '--others', '--exclude-standard'])).filter(p => !isSecret(p))
+    untracked = names(await git(io, repo, ['ls-files', '--others', '--exclude-standard'])).filter(p => !isSecret(repo, p))
   } else if ('base' in spec) {
     const mergeBase = (await git(io, repo, ['merge-base', 'HEAD', spec.base])).trim()
     label = `The changes on this branch of \`${repo}\` since it left \`${spec.base}\` (merge base ${mergeBase.slice(0, 12)})`
@@ -41,7 +42,7 @@ export async function changeOf(io: Io, repo: string, spec: ChangeSpec): Promise<
     range = ['show', '--format=%H %s%n%n%b', spec.commit]
     changed = names(await git(io, repo, ['show', '--name-only', '--format=', spec.commit]))
   }
-  const kept = changed.filter(p => !isSecret(p))
+  const kept = changed.filter(p => !isSecret(repo, p))
   const left = changed.length - kept.length
   const diff = kept.length === 0 ? '' : await git(io, repo, [...range, '--', ...kept])
   if (diff.length > MAX_DIFF) {
