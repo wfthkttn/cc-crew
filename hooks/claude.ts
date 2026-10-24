@@ -73,7 +73,7 @@ export async function fenceFor(io: Io, agentId: string): Promise<Fence | 'not-ou
   if (known !== undefined) return known
   if (notOurs.has(agentId)) return 'not-ours'
   const info = (await io.agents()).find(a => a.id === agentId)
-  if (info === undefined || !info.type.startsWith('crew:')) {
+  if (info === undefined || !info.type.startsWith('cc-crew:')) {
     if (info !== undefined) notOurs.add(agentId)
     return 'not-ours'
   }

@@ -271,6 +271,25 @@ test('a Claude reviewer may read inside its roots, never a secret, never outside
   expect(await claude.readRefusal(io, file, `${PROJECT}/sub/cert.pem`)).toContain('outside')
 })
 
+test("a Claude reviewer's first call waits for its fence; another agent's call is not crew's", async () => {
+  const fence = { roots: [PROJECT], files: [], secrets: [], codexBin: 'codex' }
+  const io = fakeIo({
+    agents: [
+      { id: 'early-reviewer', type: 'cc-crew:reviewer', description: 'review', status: 'running' },
+      { id: 'other', type: 'general-purpose', description: 'other', status: 'running' },
+    ] as Awaited<ReturnType<Fake['agents']>>,
+  })
+  io.sleep = async () => {
+    claude.fences.set('early-reviewer', fence)
+  }
+  try {
+    expect(await claude.fenceFor(io, 'early-reviewer')).toEqual(fence)
+    expect(await claude.fenceFor(io, 'other')).toBe('not-ours')
+  } finally {
+    claude.fences.delete('early-reviewer')
+  }
+})
+
 test("a Claude reviewer's shell runs inside Codex's sandbox", () => {
   const fence = { roots: [PROJECT], files: [], secrets: [], codexBin: '/bin/codex' }
   const cmd = claude.fencedCommand(fence, "grep -r 'x' .")!
