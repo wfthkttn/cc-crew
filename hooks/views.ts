@@ -4,7 +4,7 @@ import { type ClaudeAgent, LIVE } from './agents.ts'
 import { type Catalog, costOf, groupOf, modelKey, priceOf } from './catalog.ts'
 import { wrap } from './detail.ts'
 import { OVERVIEW_COLUMNS } from './overview.ts'
-import { type Limits, type Spent, GATES, groupLimit, sum, usd } from './limits.ts'
+import { type Gate, type Limits, type Spent, groupLimit, sum, usd } from './limits.ts'
 import type { LimitsProps, LogProps, LogRow, OverviewProps, ReviewerRow, RunningProps, Tab, Target, TokenCells, UsageProps, UsageRow } from './overview-props.ts'
 import type { SessionRecord } from './record.ts'
 import type { ReviewerState, Run } from './runs.ts'
@@ -227,8 +227,8 @@ export function spentOf(items: readonly UsageItem[]): Spent {
 /** What one press of a group's raise adds, in $. */
 export const RAISES_USD = [1, 10] as const
 
-/** Every group of the catalog: what it spent against its limit, a raise, and over once spent reaches it. */
-export function limitsProps(catalog: Catalog, limits: Limits, spent: Spent): LimitsProps {
+/** Every group of the catalog: what it spent against its limit, a raise, and over once spent reaches it; a switch per gate. */
+export function limitsProps(catalog: Catalog, limits: Limits, spent: Spent, gates: readonly Gate[]): LimitsProps {
   return {
     isOn: limits.isOn,
     groups: catalog.groups.map(g => {
@@ -237,7 +237,7 @@ export function limitsProps(catalog: Catalog, limits: Limits, spent: Spent): Lim
       const raises = RAISES_USD.map(n => ({ label: `+$${n}`, raise: { group: g.id, usd: n } }))
       return { label: g.name, spent: usd(used), limit: usd(limit), raises, isOver: used >= limit }
     }),
-    gates: GATES.map(gate => ({ gate, isOpen: !limits.closed.includes(gate) })),
+    gates: gates.map(gate => ({ gate, isOpen: !limits.closed.includes(gate) })),
   }
 }
 
@@ -263,6 +263,7 @@ export type ViewInput = {
   agents: readonly ClaudeAgent[]
   record: SessionRecord
   fallbackUsd: number
+  gates: readonly Gate[]
 }
 
 export function overviewProps(v: ViewInput): OverviewProps {
@@ -277,6 +278,6 @@ export function overviewProps(v: ViewInput): OverviewProps {
     running,
     usage: usageProps(v.catalog, items, v.record, v.catalogNote),
     log,
-    limits: limitsProps(v.catalog, limitsOf(v.catalog, v.fallbackUsd, v.record), spentOf(items)),
+    limits: limitsProps(v.catalog, limitsOf(v.catalog, v.fallbackUsd, v.record), spentOf(items), v.gates),
   }
 }

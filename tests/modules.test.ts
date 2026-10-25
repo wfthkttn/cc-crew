@@ -2,13 +2,15 @@ import { expect, test } from 'claude-code/testing'
 
 import * as agy from '../hooks/antigravity.ts'
 import * as claude from '../hooks/claude.ts'
+import * as claudeP from '../hooks/claude-p.ts'
 import * as codex from '../hooks/codex.ts'
 import type { Job } from '../hooks/job.ts'
 import { mergeCatalog, parseCatalog } from '../hooks/catalog.ts'
 import { settingsFrom, withDefaults } from '../hooks/config.ts'
 import { run } from '../hooks/proc.ts'
 import { parseFindings, renderFindings, systemPrompt, taskText } from '../hooks/prompt.ts'
-import { type Run, execute, keysFor, load, stopReviewer, summary } from '../hooks/runs.ts'
+import { parseReviewers } from '../hooks/reviewers.ts'
+import { type Run, execute, keysFor, kindOf, load, stopReviewer, summary } from '../hooks/runs.ts'
 import { SECRET_NAME, findSecrets, resolveRoots, siblingsOf } from '../hooks/scope.ts'
 import { type Fake, fakeIo, ok } from './fake-io.ts'
 
@@ -302,14 +304,23 @@ test("a Claude reviewer's shell runs inside Codex's sandbox", () => {
   expect(onFile).toContain(`'permissions.crew.filesystem={":minimal"="read", "${main}"="read"}'`)
 })
 
+const SETTINGS = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, fallbackUsd: 9, claudeConfigDir: '/home/u/.claude' }
+
+/** A `claude -p` child's stream-json: its init, then its result. */
+const claudePEvents = (result: Record<string, unknown>) => [
+  `${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-1', model: 'glm-5.3[1m]', tools: ['Glob', 'Grep', 'Read'] })}\n`,
+  `${JSON.stringify({ type: 'result', usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, ...result })}\n`,
+]
+
 test('a run reports each reviewer, alerts on a sign-in, and sums up', async () => {
   const io: Fake = fakeIo({
     files: FILES,
     dirs: DIRS,
     run: argv => (argv[1] === 'login' ? ok('', 'Not logged in', 1) : ok()),
+    spawn: () => ({ stdout: claudePEvents({ subtype: 'success', is_error: false, result: '', structured_output: FINDINGS }) }),
   })
-  const keys = keysFor([{ provider: 'codex' }, { provider: 'claude-p' }, { provider: 'codex' }])
-  expect(keys).toEqual(['codex-default', 'claude-p-default', 'codex-default-2'])
+  const keys = keysFor([{ provider: 'codex' }, { provider: 'glm' }, { provider: 'codex' }])
+  expect(keys).toEqual(['codex-default', 'glm-default', 'codex-default-2'])
   const r: Run = {
     id: 'r1',
     description: 'Check X',
@@ -322,22 +333,110 @@ test('a run reports each reviewer, alerts on a sign-in, and sums up', async () =
     helpers: false,
     reviewers: [
       { provider: 'codex', key: 'codex-default', status: 'running', dir: '/c/runs/r1/codex-default', startedAt: 0 },
-      { provider: 'claude-p', key: 'claude-p-default', status: 'running', dir: '/c/runs/r1/claude-p-default', startedAt: 0 },
+      { provider: 'glm', command: ['glm-claude', '--x'], key: 'glm-default', status: 'running', dir: '/c/runs/r1/glm-default', startedAt: 0 },
     ],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, fallbackUsd: 9 }
   const alert = async (_: unknown, provider: string, detail: string) => {
     io.notified.push(`${provider}: ${detail}`)
     return undefined
   }
-  await execute(io, r, settings, 'SYS', 'TASK', '/c', alert, new Map())
-  expect(r.reviewers.map(x => x.status)).toEqual(['signed_out', 'failed'])
+  await execute(io, r, SETTINGS, 'SYS', 'TASK', '/c', alert, new Map())
+  expect(r.reviewers.map(x => x.status)).toEqual(['signed_out', 'ok'])
   expect(io.notified[0]).toStartWith('codex: Codex is signed out')
   expect(io.files.has(`${r.reportDir}/codex-default.md`)).toBe(true)
   expect(io.files.has(`${r.reportDir}/run.json`)).toBe(true)
+  expect(r.reviewers[1]).toMatchObject({ usedModel: 'glm-5.3[1m]', continueId: 'sess-1', findings: 1, tokens: { in: 110, cached: 100, out: 5 } })
   const s = summary(r)
   expect(s).toContain('- codex-default (default): SIGNED OUT: Codex is signed out')
-  expect(s).toContain('claude-p is a stub')
+  expect(s).toContain('- glm-default (glm-5.3[1m]): 1 findings')
+})
+
+test('a claude -p reviewer runs headless with read tools only, confined to its roots, outside the person\'s customizations', async () => {
+  const j = job({ dir: '/c/runs/r1/glm-default', web: false })
+  const io = fakeIo({ files: FILES, dirs: DIRS, spawn: () => ({ stdout: claudePEvents({ subtype: 'success', result: '', structured_output: FINDINGS }) }) })
+  const o = await claudeP.review(io, ['glm-claude', '--x'], j, '/home/u/.claude')
+  expect(o).toMatchObject({ status: 'ok', model: 'glm-5.3[1m]', continueId: 'sess-1' })
+  expect(o.findings?.findings[0]?.title).toBe('Off by one')
+  const req = io.spawned[0]!
+  const argv = req.argv
+  expect(argv.slice(0, 3)).toEqual(['glm-claude', '--x', '-p'])
+  for (const flag of ['--restricted', '--safe-mode', '--strict-mcp-config', '--verbose']) expect(argv).toContain(flag)
+  const after = (flag: string) => argv[argv.indexOf(flag) + 1]
+  expect(after('--tools')).toBe('Read,Grep,Glob')
+  expect(after('--disallowedTools')).toBe('mcp__*')
+  expect(after('--permission-mode')).toBe('dontAsk')
+  expect(after('--add-dir')).toBe(PROJECT)
+  expect(after('--output-format')).toBe('stream-json')
+  expect(argv).not.toContain('--resume')
+  expect(req.cwd).toBe(`${j.dir}/work`)
+  expect(req.input).toBe('TASK')
+  expect(req.env).toEqual({ CLAUDE_CODE_PLUGIN_DIRS: '' })
+  expect(io.files.get(after('--system-prompt-file')!)).toBe('SYSTEM')
+  const { deny, allow } = JSON.parse(io.files.get(after('--settings')!)!).permissions
+  expect(deny).toContain(`Read(/${PROJECT}/.env)`)
+  expect(deny).toContain('Read(//home/u/.claude/projects/**)')
+  expect(deny).toContain('Read(//home/u/.claude/.credentials.json)')
+  expect(deny.some((d: string) => d.includes('main.ts'))).toBe(false)
+  expect(allow).toEqual([])
+})
+
+test('a claude -p review of a file adds its folder and denies the rest of it; web adds the web tools, allowed', async () => {
+  const main = `${PROJECT}/main.ts`
+  const j = job({ dir: '/r/g', roots: [main], files: [main], secrets: [], web: true })
+  const io = fakeIo({ files: FILES, dirs: DIRS, spawn: () => ({ stdout: claudePEvents({ subtype: 'success', result: JSON.stringify(FINDINGS) }) }) })
+  expect((await claudeP.review(io, ['claude'], j, '/home/u/.claude')).status).toBe('ok')
+  const argv = io.spawned[0]!.argv
+  expect(argv.filter((a, i) => argv[i - 1] === '--add-dir')).toEqual([PROJECT])
+  expect(argv[argv.indexOf('--tools') + 1]).toBe('Read,Grep,Glob,WebSearch,WebFetch')
+  const { deny, allow } = JSON.parse(io.files.get('/r/g/settings.json')!).permissions
+  expect(deny).toContain(`Read(/${PROJECT}/.env)`)
+  expect(deny).toContain(`Read(/${PROJECT}/sub)`)
+  expect(deny).toContain(`Read(/${PROJECT}/sub/**)`)
+  expect(deny).toContain(`Read(/${PROJECT}/.git/**)`)
+  expect(deny.some((d: string) => d.includes('main.ts'))).toBe(false)
+  expect(allow).toEqual(['WebFetch', 'WebSearch'])
+})
+
+test('a claude -p follow-up resumes its session in the same folder', async () => {
+  const io = fakeIo({ spawn: () => ({ stdout: claudePEvents({ subtype: 'success', result: '{}' }) }) })
+  const f = { ...job({ dir: '/c/runs/r1/glm-default/followup-1' }), continueId: 'sess-1', message: 'And Y?', stateDir: '/c/runs/r1/glm-default' }
+  const o = await claudeP.followUp(io, ['glm-claude'], f, '/home/u/.claude')
+  const req = io.spawned[0]!
+  expect(req.argv.slice(-2)).toEqual(['--resume', 'sess-1'])
+  expect(req.cwd).toBe('/c/runs/r1/glm-default/work')
+  expect(req.input).toBe('And Y?')
+  expect(o).toMatchObject({ status: 'ok', continueId: 'sess-1' })
+})
+
+test('a claude -p reviewer refused its credentials reads as signed out, one out of credit as quota', async () => {
+  const refused = fakeIo({ spawn: () => ({ stdout: claudePEvents({ subtype: 'success', is_error: true, api_error_status: 401, result: 'Invalid API key · Please run /login' }), code: 1 }) })
+  const o = await claudeP.review(refused, ['glm-claude'], job({ dir: '/r/g' }), '/h/.claude')
+  expect(o.status).toBe('signed_out')
+  expect(o.detail).toStartWith('glm-claude was refused its credentials')
+  const broke = fakeIo({ spawn: () => ({ stdout: claudePEvents({ subtype: 'success', is_error: true, api_error_status: 429, result: 'API Error: 429 usage limit reached' }), code: 1 }) })
+  expect((await claudeP.review(broke, ['glm-claude'], job({ dir: '/r/g' }), '/h/.claude')).status).toBe('quota')
+  const silent = fakeIo({ spawn: () => ({ stderr: ['zai: no key\n'], code: 1 }) })
+  const quiet = await claudeP.review(silent, ['glm-claude'], job({ dir: '/r/g' }), '/h/.claude')
+  expect(quiet).toMatchObject({ status: 'failed' })
+  expect(quiet.detail).toContain('no result from glm-claude')
+})
+
+test("Claude Code's rules spell absolute paths with a leading //, Windows drives as /c", () => {
+  expect(claudeP.rulePath('/home/u/.env')).toBe('//home/u/.env')
+  expect(claudeP.rulePath('C:\\Users\\u\\.env')).toBe('//c/Users/u/.env')
+})
+
+test('reviewers.json names claude -p reviewers by their command; a bad entry is refused with its reason', () => {
+  const custom = parseReviewers(JSON.stringify({ glm: { kind: 'claude-p', command: ['zai', '--bare'], model: 'opus' } }), 'r.json')
+  expect(custom).toEqual([{ name: 'glm', kind: 'claude-p', command: ['zai', '--bare'], model: 'opus' }])
+  expect(() => parseReviewers(JSON.stringify({ codex: { kind: 'claude-p', command: ['x'] } }), 'r.json')).toThrow('reviewer codex: codex is a built-in reviewer')
+  expect(() => parseReviewers(JSON.stringify({ glm: { kind: 'other', command: ['x'] } }), 'r.json')).toThrow('kind must be "claude-p"')
+  expect(() => parseReviewers(JSON.stringify({ glm: { kind: 'claude-p', command: [] } }), 'r.json')).toThrow('command must be a non-empty list')
+  expect(() => parseReviewers(JSON.stringify({ 'G LM': { kind: 'claude-p', command: ['x'] } }), 'r.json')).toThrow('lowercase letters')
+  expect(() => parseReviewers('[]', 'r.json')).toThrow('r.json must hold an object')
+  expect(kindOf({ provider: 'glm', command: ['x'] })).toBe('claude-p')
+  expect(kindOf({ provider: 'codex' })).toBe('codex')
+  expect(() => kindOf({ provider: 'glm' })).toThrow('has no command')
 })
 
 test('a running Codex reviewer stopped from the tab is killed and reads as stopped; a finished one keeps its tokens', async () => {
@@ -363,8 +462,7 @@ test('a running Codex reviewer stopped from the tab is killed and reads as stopp
     helpers: false,
     reviewers: [reviewer('codex-default'), reviewer('codex-default-2')],
   }
-  const settings = { codexBin: 'codex', agyBin: 'agy', reviewers: [], defaults: {}, reviewerRules: [], timeoutMs: 60_000, fallbackUsd: 9 }
-  const done = execute(io, r, settings, 'SYS', 'TASK', '/c', async () => undefined, new Map())
+  const done = execute(io, r, SETTINGS, 'SYS', 'TASK', '/c', async () => undefined, new Map())
   for (let i = 0; i < 10_000 && io.spawned.length < 2; i++) await Promise.resolve()
   expect(stopReviewer('r2', 'codex-default')).toBe(true)
   await done
@@ -418,13 +516,13 @@ test('the Claude reviewer is held by its own gate on every Read and Bash', () =>
 })
 
 test("a reviewer runs its provider's configured model and effort unless the call names its own; empty settings leave the tool's default", () => {
-  const s = settingsFrom({ codex_bin: 'codex', agy_bin: 'agy', reviewers: ['codex'], codex_model: '', codex_effort: 'medium', agy_model: 'gemini-4-argon-high', agy_effort: '', claude_model: 'opus', reviewer_rules: [], timeout_s: 900, model_limits: [] })
+  const s = settingsFrom({ codex_bin: 'codex', agy_bin: 'agy', reviewers: ['codex'], codex_model: '', codex_effort: 'medium', agy_model: 'gemini-4-argon-high', agy_effort: '', claude_model: 'opus', reviewer_rules: [], timeout_s: 900, model_limits: [] }, '/h/.claude')
   expect(withDefaults({ provider: 'codex' }, s.defaults)).toEqual({ provider: 'codex', effort: 'medium' })
   expect(withDefaults({ provider: 'codex', effort: 'xhigh' }, s.defaults)).toEqual({ provider: 'codex', effort: 'xhigh' })
   expect(withDefaults({ provider: 'antigravity' }, s.defaults)).toEqual({ provider: 'antigravity', model: 'gemini-4-argon-high' })
   expect(withDefaults({ provider: 'claude', model: 'haiku' }, s.defaults)).toEqual({ provider: 'claude', model: 'haiku' })
   expect(withDefaults({ provider: 'claude' }, s.defaults)).toEqual({ provider: 'claude', model: 'opus' })
-  expect(withDefaults({ provider: 'claude-p' }, s.defaults)).toEqual({ provider: 'claude-p' })
+  expect(withDefaults({ provider: 'glm' }, s.defaults)).toEqual({ provider: 'glm' })
 })
 
 test("a person's models.json replaces crew's groups, aliases and prices by name and keeps the rest; one that is no object is refused", () => {

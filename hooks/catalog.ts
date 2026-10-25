@@ -120,16 +120,18 @@ export function withCodex(catalog: Catalog, codex: CodexCatalog): Catalog {
 }
 
 const EFFORT_SUFFIX = /-(minimal|low|medium|high|xhigh|max)$/
+/** Claude Code's context-window tag on a model id, as in `glm-5.3[1m]`. */
+const WINDOW_SUFFIX = /\[[^\]]*\]$/
 const CLAUDE_FAMILY = /(opus|sonnet|haiku|fable)/
 
 /** The model a reviewer or agent ran, keyed as the catalog keys it, aliases followed. */
 export function modelKey(catalog: Catalog, provider: Provider, model: string | undefined): string {
   let key: string
-  if (provider === 'claude' || provider === 'claude-p') {
+  if (provider === 'claude') {
     const m = model ?? DEFAULT_MODEL
     key = `claude/${CLAUDE_FAMILY.exec(m)?.[1] ?? m}`
   } else {
-    key = `${provider}/${(model ?? 'default').replace(EFFORT_SUFFIX, '')}`
+    key = `${provider}/${(model ?? 'default').replace(WINDOW_SUFFIX, '').replace(EFFORT_SUFFIX, '')}`
   }
   return catalog.aliases[key] ?? key
 }

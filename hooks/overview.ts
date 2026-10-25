@@ -224,17 +224,20 @@ function limitsLines(props: LimitsProps): Line[] {
     { text: fit(r.limit, LIMIT_COLUMNS), color: MUTED },
     ...r.raises.flatMap((b, i) => [...(i > 0 ? [{ text: ' ' }] : []), ...pill(b.label, { raise: b.raise })]),
   ]
-  const gates: Line = [
-    { text: fit('Allowed', 15), color: TEXT, bold: true },
-    ...props.gates.flatMap(g => [...pill(`${g.isOpen ? '●' : '○'} ${g.gate}`, { toggle: g.gate }, !g.isOpen), { text: ' ' }]),
-  ]
+  const gates: Line[] = [[{ text: fit('Allowed', 15), color: TEXT, bold: true }]]
+  for (const g of props.gates) {
+    const switch_: Line = [...pill(`${g.isOpen ? '●' : '○'} ${g.gate}`, { toggle: g.gate }, !g.isOpen), { text: ' ' }]
+    const last = gates[gates.length - 1]!
+    if (last.length > 1 && width(last) + width(switch_) > OVERVIEW_COLUMNS) gates.push([{ text: ' '.repeat(15) }, ...switch_])
+    else last.push(...switch_)
+  }
   return [
     on,
     [{ text: '' }],
     heading('Quota groups, $ at API prices this session'),
     ...props.groups.map(row),
     [{ text: '' }],
-    gates,
+    ...gates,
     [{ text: '' }],
     muted("A group's models share its quota, each weighed by its price;"),
     muted("reviewers and Claude's agents count alike. Groups, prices and"),

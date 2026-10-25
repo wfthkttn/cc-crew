@@ -1,4 +1,4 @@
-import type { Provider } from './config.ts'
+import type { Kind } from './config.ts'
 
 /** Tokens one reviewer or agent spent, alike for every provider. */
 export type Tokens = {
@@ -16,11 +16,11 @@ export type Tokens = {
 
 const num = (o: Record<string, unknown>, key: string): number => (typeof o[key] === 'number' ? (o[key] as number) : 0)
 
-/** A provider's own usage report as Tokens; undefined when it reported none. */
-export function tokensOf(provider: Provider, raw: unknown): Tokens | undefined {
+/** A reviewer's own usage report as Tokens, read the way its kind reports; undefined when it reported none. */
+export function tokensOf(kind: Kind, raw: unknown): Tokens | undefined {
   if (raw === null || typeof raw !== 'object') return undefined
   const u = raw as Record<string, unknown>
-  switch (provider) {
+  switch (kind) {
     case 'codex':
       // Codex counts its cached input inside input_tokens, and reasoning inside output_tokens.
       return { in: num(u, 'input_tokens'), cached: num(u, 'cached_input_tokens'), out: num(u, 'output_tokens'), reasoning: num(u, 'reasoning_output_tokens') }

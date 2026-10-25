@@ -4,7 +4,7 @@ import { type ClaudeAgent, ClaudeAgents } from '../hooks/agents.ts'
 import { pressAt, wrap } from '../hooks/detail.ts'
 import { detailProps } from '../hooks/register.ts'
 import { type Group, costOf, groupOf, mergeCatalog, modelKey, priceOf, withCodex } from '../hooks/catalog.ts'
-import { agentRefusal, followUpRefusal, reviewRefusal, sum } from '../hooks/limits.ts'
+import { agentRefusal, followUpRefusal, gatesOf, reviewRefusal, sum } from '../hooks/limits.ts'
 import { OVERVIEW_COLUMNS, actionAt, logPageSize, overviewLines } from '../hooks/overview.ts'
 import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { type SessionRecord, emptyRecord } from '../hooks/record.ts'
@@ -141,8 +141,11 @@ function viewOf(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] =
     agents: AGENTS,
     record: { ...emptyRecord(), turns: 7, main: CHAT, chat: { 'claude/opus': CHAT } },
     fallbackUsd: 10,
+    gates: GATES,
   }
 }
+
+const GATES = gatesOf([])
 
 const RUNS = [run('r1', ['running', 'ok']), run('r0', ['ok', 'stopped'])]
 const CHAT = { in: 1_200_000, cached: 1_000_000, out: 30_000 }
@@ -243,6 +246,17 @@ test('Limits: an on switch, every quota group against its limit in $, and a swit
   expect(actionAt(p, lines[0]!.indexOf('Log'), 0)).toEqual({ tab: 'log' })
 })
 
+test("Limits: a reviewer from reviewers.json gets a switch; switches that don't fit run on below", () => {
+  const custom = [{ name: 'glm', kind: 'claude-p' as const, command: ['glm-claude'] }]
+  const p = overviewProps({ ...viewOf('limits'), gates: gatesOf(custom) })
+  const lines = text(p)
+  expect(lines.map(l => [...l].length)).toEqual(lines.map(() => OVERVIEW_COLUMNS))
+  expect(lines[9]).toContain('▐● codex▌ ▐● antigravity▌ ▐● claude▌ ▐● glm▌')
+  expect(lines[10]).toMatch(/^ {15}▐● agents▌/)
+  expect(actionAt(p, lines[9]!.indexOf('glm'), 9)).toEqual({ toggle: 'glm' })
+  expect(actionAt(p, lines[10]!.indexOf('agents'), 10)).toEqual({ toggle: 'agents' })
+})
+
 test("a run's and an agent's details: when, how it went, what it spent, then the brief or the prompt", () => {
   const r = run('r0', ['ok', 'stopped'])
   const text = runDetail(r, 'Review the parser.')
@@ -277,10 +291,10 @@ test("work in a quota group is refused once the group's $ reach its limit, revie
 
 test('the tab badge counts reviewers and agents running plus limits reached, amber once one is', () => {
   const spent = spentOf(itemsOf(CATALOG, RUNS, AGENTS))
-  const roomy = limitsProps(CATALOG, limitsOf(CATALOG, 10, { ...emptyRecord(), raises: { groups: { claude: 100 } } }), spent)
+  const roomy = limitsProps(CATALOG, limitsOf(CATALOG, 10, { ...emptyRecord(), raises: { groups: { claude: 100 } } }), spent, GATES)
   expect(badgeOf(RUNS, AGENTS, roomy)).toEqual({ count: 2, level: 'info' })
-  expect(badgeOf(RUNS, AGENTS, limitsProps(CATALOG, limitsOf(CATALOG, 10, emptyRecord()), spent))).toEqual({ count: 3, level: 'attention' })
-  expect(badgeOf(RUNS, AGENTS, limitsProps(CATALOG, limitsOf(CATALOG, 10, { ...emptyRecord(), isLimitsOff: true }), spent))).toEqual({ count: 2, level: 'info' })
+  expect(badgeOf(RUNS, AGENTS, limitsProps(CATALOG, limitsOf(CATALOG, 10, emptyRecord()), spent, GATES))).toEqual({ count: 3, level: 'attention' })
+  expect(badgeOf(RUNS, AGENTS, limitsProps(CATALOG, limitsOf(CATALOG, 10, { ...emptyRecord(), isLimitsOff: true }), spent, GATES))).toEqual({ count: 2, level: 'info' })
   expect(badgeOf([], [], roomy)).toEqual({ count: 0, level: 'info' })
 })
 

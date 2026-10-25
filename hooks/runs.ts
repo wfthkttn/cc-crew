@@ -2,14 +2,27 @@ import type { Io } from './io.ts'
 
 import * as agy from './antigravity.ts'
 import * as claude from './claude.ts'
+import * as claudeP from './claude-p.ts'
 import * as codex from './codex.ts'
-import type { Provider, Settings } from './config.ts'
+import { type BuiltIn, type Kind, type Provider, type Settings, isBuiltIn } from './config.ts'
 import type { FollowUp, Job, Outcome, Preflight, Status } from './job.ts'
 import { sum } from './limits.ts'
 import { renderFindings } from './prompt.ts'
 import { type Tokens, tokensOf } from './usage.ts'
 
-export type ReviewerSpec = { provider: Provider; model?: string; effort?: string }
+/** `command`: a reviewer from reviewers.json, the command it was started with; follow-ups reuse it. */
+export type ReviewerSpec = { provider: Provider; model?: string; effort?: string; command?: string[] }
+
+export function kindOf(r: ReviewerSpec): Kind {
+  if (r.command !== undefined) return 'claude-p'
+  if (!isBuiltIn(r.provider)) throw new Error(`crew: reviewer ${r.provider} has no command and is no built-in`)
+  return r.provider satisfies BuiltIn
+}
+
+function commandOf(r: ReviewerSpec): string[] {
+  if (r.command === undefined) throw new Error(`crew: reviewer ${r.provider} has no command`)
+  return r.command
+}
 
 export type ReviewerState = ReviewerSpec & {
   /** Unique within the run: `<provider>-<model>`, numbered on a repeat. */
@@ -69,7 +82,7 @@ function disarm(run: Run, r: ReviewerState): void {
   stops.delete(stopKey(run, r))
 }
 
-/** Stops a running reviewer: a Codex or Antigravity child is killed, a Claude reviewer's calls are refused from then on. */
+/** Stops a running reviewer: a child process is killed, a Claude reviewer's calls are refused from then on. */
 export function stopReviewer(runId: string, key: string): boolean {
   const stop = stops.get(`${runId}/${key}`)
   if (stop === undefined) return false
@@ -123,16 +136,15 @@ export async function load(io: Io, cacheDir: string, id: string): Promise<Run> {
   return run
 }
 
-async function preflight(io: Io, s: Settings, provider: Provider, cacheDir: string): Promise<Preflight> {
-  switch (provider) {
+async function preflight(io: Io, s: Settings, kind: Kind, cacheDir: string): Promise<Preflight> {
+  switch (kind) {
     case 'codex':
       return codex.preflight(io, s.codexBin)
     case 'antigravity':
       return agy.preflight(io, s.agyBin, `${cacheDir}/agy-home`)
     case 'claude':
-      return { ok: true }
     case 'claude-p':
-      return { ok: false, status: 'failed', detail: 'claude-p is a stub: not built yet' }
+      return { ok: true }
   }
 }
 
@@ -179,7 +191,7 @@ function apply(r: ReviewerState, o: Outcome, endedAt: number): void {
   if (o.detail !== undefined) r.detail = o.detail
   if (o.continueId !== undefined) r.continueId = o.continueId
   if (o.findings !== undefined) r.findings = o.findings.findings.length
-  const tokens = tokensOf(r.provider, o.usage)
+  const tokens = tokensOf(kindOf(r), o.usage)
   if (tokens !== undefined) r.tokens = r.tokens === undefined ? tokens : sum([r.tokens, tokens])
 }
 
@@ -226,14 +238,15 @@ async function runOne(
   signal?: AbortSignal,
 ): Promise<void> {
   let o: Outcome
-  const stopped = r.provider === 'claude' ? signal : arming(run, r, signal)
-  const pre = await preflight(io, s, r.provider, cacheDir)
+  const kind = kindOf(r)
+  const stopped = kind === 'claude' ? signal : arming(run, r, signal)
+  const pre = await preflight(io, s, kind, cacheDir)
   if (!pre.ok) {
     o = { status: pre.status, text: '', model: r.model ?? 'default', detail: pre.detail }
   } else {
     const j = job(run, r, system, task, s, stopped)
     try {
-      switch (r.provider) {
+      switch (kind) {
         case 'codex':
           o = await codex.review(io, s.codexBin, j)
           break
@@ -247,7 +260,7 @@ async function runOne(
           break
         }
         case 'claude-p':
-          o = { status: 'failed', text: '', model: 'none', detail: 'claude-p is a stub: not built yet' }
+          o = await claudeP.review(io, commandOf(r), j, s.claudeConfigDir)
           break
       }
     } catch (err) {
@@ -315,7 +328,7 @@ export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Setting
   const message = f.message
   let o: Outcome
   try {
-    switch (r.provider) {
+    switch (kindOf(r)) {
       case 'codex':
         o = await codex.followUp(io, s.codexBin, f)
         break
@@ -327,7 +340,7 @@ export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Setting
         o = await asked.pending.wait()
         break
       case 'claude-p':
-        o = { status: 'failed', text: '', model: 'none', detail: 'claude-p is a stub: not built yet' }
+        o = await claudeP.followUp(io, commandOf(r), f, s.claudeConfigDir)
         break
     }
   } catch (err) {

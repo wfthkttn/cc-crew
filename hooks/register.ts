@@ -6,10 +6,11 @@ import { wrap } from './detail.ts'
 import { type ChangeSpec, changeOf } from './changes.ts'
 import { homeEnv as agyHomeEnv } from './antigravity.ts'
 import * as claude from './claude.ts'
-import { type Provider, type Settings, isProvider, settingsFrom, withDefaults } from './config.ts'
+import { BUILT_IN, type Choice, type Provider, type Settings, isBuiltIn, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
 import { type Catalog, groupOf, loadCatalog, modelKey, readCodexCatalog, withCodex } from './catalog.ts'
-import { agentRefusal, followUpRefusal, GATES, type Gate, reviewRefusal, sum } from './limits.ts'
+import { agentRefusal, followUpRefusal, type Gate, gatesOf, reviewRefusal, sum } from './limits.ts'
+import { type CustomReviewer, loadReviewers, reviewersPath } from './reviewers.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
 import type { DetailProps, Tab, Target } from './overview-props.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
@@ -47,15 +48,24 @@ Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one
 
 Models: a reviewer whose call names no model or effort runs the configured default for its provider. codex takes its own model names and effort low|medium|high|xhigh|max|ultra. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku; its effort is the configured one, else the session's, and a call cannot set it.`
 
-const REVIEWER_ITEM = {
-  type: 'object',
-  properties: {
-    provider: { type: 'string', enum: ['codex', 'antigravity', 'claude', 'claude-p'] },
-    model: { type: 'string' },
-    effort: { type: 'string' },
-  },
-  required: ['provider'],
-  additionalProperties: false,
+function reviewDescription(custom: readonly CustomReviewer[]): string {
+  if (custom.length === 0) return REVIEW_DESCRIPTION
+  const names = custom.map(r => `${r.name} (${r.command[0]}${r.model !== undefined ? `, ${r.model} by default` : ''})`).join(', ')
+  return `${REVIEW_DESCRIPTION}\n\nAlso configured here: ${names}. Each is Claude Code run headless through its own command, on whatever models that command serves; a call's model and effort reach it as --model and --effort.`
+}
+
+function reviewSchema(providers: readonly Provider[]) {
+  const item = {
+    type: 'object',
+    properties: {
+      provider: { type: 'string', enum: [...providers] },
+      model: { type: 'string' },
+      effort: { type: 'string' },
+    },
+    required: ['provider'],
+    additionalProperties: false,
+  }
+  return { ...REVIEW_SCHEMA, properties: { ...REVIEW_SCHEMA.properties, reviewers: { type: 'array', items: item, description: 'Who reviews; the configured default set when omitted' } } }
 }
 
 const REVIEW_SCHEMA = {
@@ -63,7 +73,6 @@ const REVIEW_SCHEMA = {
   properties: {
     description: { type: 'string', description: 'A short (3-5 word) description of the review' },
     prompt: { type: 'string', description: 'The self-contained brief every reviewer gets' },
-    reviewers: { type: 'array', items: REVIEWER_ITEM, description: 'Who reviews; the configured default set when omitted' },
     read: {
       description: '"project" (default), "none", or a list of paths (absolute, or relative to the project)',
       anyOf: [{ type: 'string', enum: ['project', 'none'] }, { type: 'array', items: { type: 'string' } }],
@@ -108,6 +117,8 @@ const STATUS_SCHEMA = {
 }
 
 let settings: Settings
+/** The person's reviewers.json; set at session start. */
+let custom: CustomReviewer[] = []
 let system = REVIEWER_PROMPT
 let cacheDir = ''
 /** Set at session start. */
@@ -238,7 +249,7 @@ async function open($: EngineInterface, target: Target): Promise<void> {
 let badge: Badge | null = null
 
 async function syncBadge($: EngineInterface): Promise<void> {
-  const next = badgeOf(sessionRuns(), claudeAgents.all(), limitsProps(liveCatalog(), currentLimits(), currentSpent()))
+  const next = badgeOf(sessionRuns(), claudeAgents.all(), limitsProps(liveCatalog(), currentLimits(), currentSpent(), gatesOf(custom)))
   if (badge !== null && next.count === badge.count && next.level === badge.level) return
   badge = next
   await $.sidebar.badge({ id: TAB_ID, ...next })
@@ -270,15 +281,26 @@ function str(f: Fields, key: string): string {
   return v
 }
 
+const providers = (): Provider[] => [...BUILT_IN, ...custom.map(r => r.name)]
+
+/** A reviewer named in a call or in the default list, its defaults filled in; a reviewers.json one carries its command. */
+function specOf(provider: string, own: Choice, where: string): ReviewerSpec {
+  if (isBuiltIn(provider)) return withDefaults({ provider, ...own }, settings.defaults)
+  const entry = custom.find(r => r.name === provider)
+  if (entry === undefined) throw new BadInput(`unknown provider ${provider} ${where} (known: ${providers().join(', ')}; others go in ${reviewersPath('~')})`)
+  const defaults: Choice = { ...(entry.model !== undefined ? { model: entry.model } : {}), ...(entry.effort !== undefined ? { effort: entry.effort } : {}) }
+  return withDefaults({ provider, ...own, command: entry.command }, { [provider]: defaults })
+}
+
 function reviewersOf(f: Fields): ReviewerSpec[] {
-  if (f.reviewers === undefined) return settings.reviewers.map(provider => withDefaults({ provider }, settings.defaults))
+  if (f.reviewers === undefined) return settings.reviewers.map(provider => specOf(provider, {}, 'in the default reviewers setting'))
   if (!Array.isArray(f.reviewers) || f.reviewers.length === 0) throw new BadInput('reviewers must be a non-empty list')
   return f.reviewers.map((r: Fields) => {
-    if (typeof r.provider !== 'string' || !isProvider(r.provider)) throw new BadInput(`unknown provider: ${String(r.provider)}`)
-    const spec: ReviewerSpec = { provider: r.provider as Provider }
-    if (typeof r.model === 'string') spec.model = r.model
-    if (typeof r.effort === 'string') spec.effort = r.effort
-    return withDefaults(spec, settings.defaults)
+    if (typeof r.provider !== 'string') throw new BadInput(`a reviewer's provider must be a string, not ${String(r.provider)}`)
+    const own: Choice = {}
+    if (typeof r.model === 'string') own.model = r.model
+    if (typeof r.effort === 'string') own.effort = r.effort
+    return specOf(r.provider, own, 'in the call')
   })
 }
 
@@ -503,18 +525,19 @@ function answer(work: Promise<string>) {
 }
 
 export const register: Register = (on, options) => {
-  settings = settingsFrom(options)
-
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     const home = await $.env.get('HOME')
     if (home === undefined) throw new Error('crew: HOME is not set, so its cache folder is unknown')
     isWindows = (await $.env.get('OS')) === 'Windows_NT'
     cacheDir = join(join(home, '.cache'), 'crew')
+    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+    settings = settingsFrom(options, configDir !== undefined && configDir !== '' ? configDir : join(home, '.claude'))
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
+    custom = await loadReviewers(ioOf($), home)
     for (const spec of claude.agentSpecs(system, approvedDir(), settings.defaults.claude?.effort, !isWindows)) await $.agent.register(spec)
-    await $.tool.register({ name: 'review', description: REVIEW_DESCRIPTION, inputSchema: REVIEW_SCHEMA, isDeferred: false })
+    await $.tool.register({ name: 'review', description: reviewDescription(custom), inputSchema: reviewSchema(providers()), isDeferred: false })
     if (isWindows) {
       await $.tool.register({ name: fileTools.LIST_TOOL, description: fileTools.LIST_DESCRIPTION, inputSchema: fileTools.LIST_SCHEMA })
       await $.tool.register({ name: fileTools.SEARCH_TOOL, description: fileTools.SEARCH_DESCRIPTION, inputSchema: fileTools.SEARCH_SCHEMA })
@@ -599,8 +622,8 @@ export const register: Register = (on, options) => {
       record.raises = { groups: { ...record.raises.groups, [group]: (record.raises.groups[group] ?? 0) + (raise.usd as number) } }
       await keep($)
     }
-    if (typeof data.toggle === 'string' && (GATES as readonly string[]).includes(data.toggle)) {
-      const gate = data.toggle as Gate
+    if (typeof data.toggle === 'string' && gatesOf(custom).includes(data.toggle)) {
+      const gate: Gate = data.toggle
       record.closed = record.closed.includes(gate) ? record.closed.filter(g => g !== gate) : [...record.closed, gate]
       await keep($)
     }
@@ -652,6 +675,7 @@ export const register: Register = (on, options) => {
         agents: claudeAgents.all(),
         record,
         fallbackUsd: settings.fallbackUsd,
+        gates: gatesOf(custom),
       })
       const height = Math.min(room.drawer, overviewLines(props).length)
       filled = fillSlot(filled, DRAWER_SLOT, () => Client({ key: OVERVIEW_KEY, module: './overview.ts', props, width: OVERVIEW_COLUMNS, height }))

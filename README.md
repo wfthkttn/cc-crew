@@ -60,7 +60,27 @@ name; this does not find secrets stored under other names.
 
 Codex runs with a read-only filesystem profile. Antigravity gets a restricted tool list and path deny rules.
 Claude's Read calls are checked against resolved paths, and its shell commands run through Codex's sandbox. On
-Windows, Claude reviewers have listing and search tools instead of a shell.
+Windows, Claude reviewers have listing and search tools instead of a shell. A reviewer from `reviewers.json` runs
+Claude Code headless (`-p --restricted --safe-mode`) with Read, Grep and Glob only, in a working folder of its own,
+the read paths added beside it, and deny rules for secret files and for Claude's own session records and
+credentials; none of your CLAUDE.md, settings files, plugins, hooks or MCP servers load into it.
+
+### More reviewers
+
+`~/.config/crew/reviewers.json` adds reviewers that run Claude Code headless through a command of your choosing, for
+example a wrapper that points it at another endpoint or account. Each is called by its name like a built-in, gets a
+switch under Limits, and counts in a group of `models.json` whose `provider` is that name:
+
+```json
+{ "glm": { "kind": "claude-p", "command": ["claude-glm"], "model": "opus" } }
+```
+
+- `command`: the program and its first arguments; crew appends `-p` and the rest. On Windows, a script needs its
+  interpreter first, e.g. `["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Users\\me\\bin\\claude-glm"]`.
+- `model`, `effort`: what it runs when a call names neither; a call's own reach it as `--model` and `--effort`.
+- Its models count in `models.json` as `<name>/<model>`, a context tag such as `[1m]` dropped, so `models.json` (yours
+  in `~/.config/crew/`) needs a group with `"provider": "<name>"` and prices for its models; `<name>/default` is the
+  model it runs when neither names one.
 
 Web access and helper agents are off by default. `web: true` permits web access; `helpers: true` permits Codex and
 Antigravity reviewers to run helpers. Web access lets a reviewer send information from the files it reads to a URL.
@@ -88,7 +108,7 @@ again on resume.
 ## Settings
 
 - `codex_bin` and `agy_bin`: command or absolute path, default `codex` and `agy`.
-- `reviewers`: default provider list.
+- `reviewers`: default provider list; it can name reviewers from `reviewers.json`.
 - `codex_model`, `agy_model`, `claude_model`: default models. Empty leaves the choice to the provider; Claude defaults
   to `opus`.
 - `codex_effort`, `agy_effort`, `claude_effort`: default effort. Codex and Claude default to `medium`; Antigravity is

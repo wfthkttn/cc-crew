@@ -1,5 +1,6 @@
 import type { Group } from './catalog.ts'
-import type { Provider } from './config.ts'
+import { BUILT_IN, type Provider } from './config.ts'
+import type { CustomReviewer } from './reviewers.ts'
 import type { Tokens } from './usage.ts'
 
 /** The counts added up; `written` only where some were reported. */
@@ -14,7 +15,8 @@ export function sum(all: readonly (Tokens | undefined)[]): Tokens {
 /** Who may be stopped from starting: a reviewer provider, or Claude's own agents. */
 export type Gate = Provider | 'agents'
 
-export const GATES: readonly Gate[] = ['codex', 'antigravity', 'claude', 'agents']
+/** Each built-in reviewer, each one reviewers.json adds, and Claude's agents. */
+export const gatesOf = (custom: readonly CustomReviewer[]): Gate[] => [...BUILT_IN, ...custom.map(r => r.name), 'agents']
 
 /** A session's limits in $ at API prices, by group id: the catalog's with this session's raises on top; `isOn` false leaves only the gates. */
 export type Limits = {
