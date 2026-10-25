@@ -2,6 +2,7 @@
   "name": "cc-crew",
   "version": "0.1.0",
   "description": "Reviews by other harnesses' models (Codex, Antigravity) and Claude, under one tool with enforced read limits",
+  "author": { "name": "alex" },
   "dependencies": ["cc-conversation", "cc-sidebar"],
   "userConfig": {
     "codex_bin": {
