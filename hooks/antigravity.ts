@@ -58,13 +58,6 @@ async function prepare(io: Io, j: Omit<Job, 'task'>, p: Paths): Promise<void> {
 }
 
 export async function preflight(io: Io, bin: string, home: string): Promise<Preflight> {
-  if (isWindowsPath(home)) {
-    return {
-      ok: false,
-      status: 'failed',
-      detail: "not on Windows yet: nothing has shown that agy's deny rules match Windows paths, and without them its reviewer could read the whole disk",
-    }
-  }
   let r
   try {
     r = await run(io, { argv: [bin, '-p', '/quota'], env: homeEnv(home) }, { timeoutMs: 20_000 })

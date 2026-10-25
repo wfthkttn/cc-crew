@@ -11,8 +11,9 @@ Provided as is.
 - Claude Code 2.1.296 or later. The sidebar needs fullscreen rendering; outside fullscreen nothing is drawn.
 - [cc-sidebar](https://github.com/wfthkttn/cc-sidebar) and
   [cc-conversation](https://github.com/wfthkttn/cc-conversation).
-- The Codex CLI for Codex reviewers, and for the sandbox around Claude reviewers' shell commands on Unix.
-- The Antigravity CLI, `agy`, for Antigravity reviewers. Its reviewer is disabled on Windows.
+- The Codex CLI for Codex reviewers, and for the sandbox around Claude reviewers' shell commands on Unix, signed in
+  once with `codex login --device-auth`.
+- The Antigravity CLI, `agy`, for Antigravity reviewers, signed in once by running `agy` in a terminal.
 - Bash for reading Codex's model catalog; on Windows, Git Bash.
 
 ## Install

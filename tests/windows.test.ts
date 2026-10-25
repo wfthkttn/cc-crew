@@ -194,10 +194,12 @@ test('a search refuses a pattern that backtracks without end, and a folder it ca
   expect('text' in listed && listed.text.includes('sub/ (could not be listed: Error: EACCES)')).toBe(true)
 })
 
-test('an Antigravity reviewer does not start on Windows, where its read fence is unproven', async () => {
-  const pre = await agy.preflight(fakeIo(), 'agy', 'C:\\Users\\u\\.cache\\crew\\agy-home')
-  expect(pre.ok).toBe(false)
-  expect(!pre.ok && pre.detail).toContain('not on Windows yet')
+test('an Antigravity reviewer starts on Windows, its sign-in checked under its own home', async () => {
+  const home = 'C:\\Users\\u\\.cache\\crew\\agy-home'
+  const io = fakeIo({ spawn: () => ({ stdout: ['Gemini Limit 80%\n'], code: 0 }) })
+  expect(await agy.preflight(io, 'agy', home)).toEqual({ ok: true })
+  expect(io.spawned[0]!.argv).toEqual(['agy', '-p', '/quota'])
+  expect(io.spawned[0]!.env).toMatchObject({ HOME: home, USERPROFILE: home })
 })
 
 const job = (over: Partial<Job> = {}): Job => ({
