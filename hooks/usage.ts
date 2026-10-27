@@ -8,6 +8,8 @@ export type Tokens = {
   cached: number
   /** The part of `in` written to the cache, where the provider reports it apart (Claude). */
   written?: number
+  /** The part of `written` that went to the 1-hour cache, where the report splits writes by lifetime. */
+  written1h?: number
   /** Every generated token, reasoning included. */
   out: number
   /** The part of `out` spent reasoning, where the provider reports it. */
@@ -42,7 +44,10 @@ export function tokensOf(kind: Kind, raw: unknown): Tokens | undefined {
 export function claudeTokens(u: Record<string, unknown>): Tokens {
   const cached = num(u, 'cache_read_input_tokens')
   const written = num(u, 'cache_creation_input_tokens')
-  return { in: num(u, 'input_tokens') + cached + written, cached, written, out: num(u, 'output_tokens') }
+  const base = { in: num(u, 'input_tokens') + cached + written, cached, written, out: num(u, 'output_tokens') }
+  const split = u.cache_creation
+  if (split === null || typeof split !== 'object') return base
+  return { ...base, written1h: num(split as Record<string, unknown>, 'ephemeral_1h_input_tokens') }
 }
 
 /** `837k`, `1.2M`, `950`. */

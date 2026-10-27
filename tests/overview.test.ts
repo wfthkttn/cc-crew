@@ -32,6 +32,9 @@ test("each provider's usage reads as tokens in (cache included) and out", () => 
     written: 20,
     out: 5,
   })
+  expect(
+    tokensOf('claude', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20, cache_creation: { ephemeral_1h_input_tokens: 15, ephemeral_5m_input_tokens: 5 } }),
+  ).toEqual({ in: 130, cached: 100, written: 20, written1h: 15, out: 5 })
   expect(tokensOf('codex', undefined)).toBe(undefined)
   expect([shortCount(950), shortCount(8400), shortCount(1_154_303)]).toEqual(['950', '8k', '1.2M'])
 })
@@ -48,8 +51,8 @@ const CATALOG = mergeCatalog(
     },
     aliases: { 'codex/default': 'codex/gpt-6.1-sol' },
     prices: {
-      'claude/opus': { in: 10, cached: 1, written: 12.5, out: 50 },
-      'claude/sonnet': { in: 1, cached: 0.1, written: 1.25, out: 5 },
+      'claude/opus': { in: 10, cached: 1, written: 12.5, written1h: 20, out: 50 },
+      'claude/sonnet': { in: 1, cached: 0.1, written: 1.25, written1h: 2, out: 5 },
       'codex/gpt-6.1-sol': { in: 1, cached: 0.1, written: 0, out: 10 },
       'antigravity/gemini-3.8-flash': { in: 1, cached: 0.1, written: 0, out: 4 },
     },
@@ -60,8 +63,11 @@ const CATALOG = mergeCatalog(
 test('a run costs each kind of token at its own price; counts add up, cache writes where reported', () => {
   expect(cents(costOf({ in: 900_000, cached: 600_000, out: 40_000 }, CATALOG.prices['codex/gpt-6.1-sol']!))).toBe(30 + 6 + 40)
   expect(cents(costOf({ in: 130_000, cached: 100_000, written: 20_000, out: 5_000 }, CATALOG.prices['claude/opus']!))).toBe(10 + 10 + 25 + 25)
+  expect(cents(costOf({ in: 130_000, cached: 100_000, written: 20_000, written1h: 20_000, out: 5_000 }, CATALOG.prices['claude/opus']!))).toBe(10 + 10 + 40 + 25)
+  expect(cents(costOf({ in: 130_000, cached: 100_000, written: 20_000, written1h: 12_000, out: 5_000 }, CATALOG.prices['claude/opus']!))).toBe(10 + 10 + 10 + 24 + 25)
   expect(costOf(undefined, CATALOG.prices['claude/opus']!)).toBe(0)
   expect(sum([{ in: 1, cached: 0, out: 1 }, { in: 2, cached: 1, written: 1, out: 0 }])).toEqual({ in: 3, cached: 1, written: 1, out: 1 })
+  expect(sum([{ in: 5, cached: 0, written: 5, written1h: 3, out: 0 }, { in: 2, cached: 1, written: 1, out: 0 }])).toEqual({ in: 7, cached: 1, written: 6, written1h: 3, out: 0 })
 })
 
 test('models are keyed by vendor and model: Claude ids fold to their family, an Antigravity id drops its effort, an alias is followed', () => {
@@ -71,7 +77,7 @@ test('models are keyed by vendor and model: Claude ids fold to their family, an 
   expect(modelKey(CATALOG, 'codex', undefined)).toBe('codex/gpt-6.1-sol')
   expect(groupOf(CATALOG, 'claude/sonnet')).toEqual({ group: CATALOG.groups[0], isPlaced: true })
   expect(groupOf(CATALOG, 'codex/gpt-7')).toEqual({ group: CATALOG.groups[1], isPlaced: false })
-  expect(priceOf(CATALOG, 'claude/haiku')).toEqual({ price: { in: 10, cached: 1, written: 12.5, out: 50 }, isPriced: false })
+  expect(priceOf(CATALOG, 'claude/haiku')).toEqual({ price: { in: 10, cached: 1, written: 12.5, written1h: 20, out: 50 }, isPriced: false })
   expect(() => groupOf(CATALOG, 'other/x')).toThrow('no group for other')
 })
 

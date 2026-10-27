@@ -670,7 +670,8 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__cc-crew__review_status' }, ($, e) => answer(status($, fields(e))))
 
   on('turn.complete', async ($, e, next) => {
-    const tokens = e.usage === undefined ? undefined : claudeTokens(e.usage)
+    // a turn's usage doesn't split its cache writes by lifetime; sessions run the 1-hour cache
+    const tokens = e.usage === undefined ? undefined : { ...claudeTokens(e.usage), written1h: e.usage.cache_creation_input_tokens }
     if (e.agentId === undefined) {
       record.turns += 1
       if (e.usage !== undefined && tokens !== undefined) {

@@ -2,8 +2,12 @@ import { DEFAULT_MODEL, type Provider } from './config.ts'
 import type { Io } from './io.ts'
 import type { Tokens } from './usage.ts'
 
-/** API prices in $ per 1M tokens; `written` is a cache write, 0 where the vendor charges none. */
-export type Price = { in: number; cached: number; written: number; out: number }
+/**
+ * API prices in $ per 1M tokens; `written` is a cache write, 0 where the vendor charges none. `written1h` is the
+ * 1-hour cache write where the vendor charges it apart from `written` (Claude's 5-minute one); absent, writes cost
+ * `written` whatever their lifetime.
+ */
+export type Price = { in: number; cached: number; written: number; written1h?: number; out: number }
 
 /** Models that share one quota; a limit is the group's, in $ at API prices. */
 export type Group = { id: string; name: string; provider: Provider; models: string[]; limitUsd?: number }
@@ -156,12 +160,15 @@ export function priceOf(catalog: Catalog, key: string): { price: Price; isPriced
   const known = Object.entries(catalog.prices).flatMap(([k, p]) => (groupOf(catalog, k).group.id === group.id ? [p] : []))
   if (known.length === 0) throw new Error(`crew: no price for ${key} or any model of its group ${group.name}; add one to models.json`)
   const dearest = (f: keyof Price) => Math.max(...known.map(p => p[f]))
-  return { price: { in: dearest('in'), cached: dearest('cached'), written: dearest('written'), out: dearest('out') }, isPriced: false }
+  const written1h = known.some(p => p.written1h !== undefined) ? { written1h: Math.max(...known.map(p => p.written1h ?? p.written)) } : {}
+  return { price: { in: dearest('in'), cached: dearest('cached'), written: dearest('written'), ...written1h, out: dearest('out') }, isPriced: false }
 }
 
-/** What tokens cost at `price`, in $: new input, cache reads, cache writes and output each at their own rate. */
+/** What tokens cost at `price`, in $: new input, cache reads, cache writes (by lifetime where reported) and output each at their own rate. */
 export function costOf(t: Tokens | undefined, price: Price): number {
   if (t === undefined) return 0
   const written = t.written ?? 0
-  return ((t.in - t.cached - written) * price.in + t.cached * price.cached + written * price.written + t.out * price.out) / 1_000_000
+  const hour = t.written1h ?? 0
+  const writes = (written - hour) * price.written + hour * (price.written1h ?? price.written)
+  return ((t.in - t.cached - written) * price.in + t.cached * price.cached + writes + t.out * price.out) / 1_000_000
 }

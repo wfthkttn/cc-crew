@@ -3,12 +3,13 @@ import { BUILT_IN, type Provider } from './config.ts'
 import type { CustomReviewer } from './reviewers.ts'
 import type { Tokens } from './usage.ts'
 
-/** The counts added up; `written` only where some were reported. */
+/** The counts added up; `written` and `written1h` only where some were reported. */
 export function sum(all: readonly (Tokens | undefined)[]): Tokens {
   return all.reduce<Tokens>((s, t) => {
     if (t === undefined) return s
     const written = s.written === undefined && t.written === undefined ? {} : { written: (s.written ?? 0) + (t.written ?? 0) }
-    return { in: s.in + t.in, cached: s.cached + t.cached, ...written, out: s.out + t.out }
+    const written1h = s.written1h === undefined && t.written1h === undefined ? {} : { written1h: (s.written1h ?? 0) + (t.written1h ?? 0) }
+    return { in: s.in + t.in, cached: s.cached + t.cached, ...written, ...written1h, out: s.out + t.out }
   }, { in: 0, cached: 0, out: 0 })
 }
 
