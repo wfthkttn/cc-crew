@@ -1,5 +1,4 @@
-import { DEFAULT_MODEL } from './claude.ts'
-import type { Provider } from './config.ts'
+import { DEFAULT_MODEL, type Provider } from './config.ts'
 import type { Io } from './io.ts'
 import type { Tokens } from './usage.ts'
 

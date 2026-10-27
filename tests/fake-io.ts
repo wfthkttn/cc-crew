@@ -1,16 +1,4 @@
-import type {
-  AgentInfo,
-  AgentSpawnArgs,
-  AgentSpawnResult,
-  FsEntry,
-  HookStream,
-  ProcessRunResult,
-  ProcessSpawnChunk,
-  ProcessSpawnRequest,
-  ProcessSpawnResult,
-  SessionSendArgs,
-  SessionSendResult,
-} from 'claude-code'
+import type { FsEntry, HookStream, ProcessRunResult, ProcessSpawnChunk, ProcessSpawnRequest, ProcessSpawnResult } from 'claude-code'
 
 import type { Io } from '../hooks/io.ts'
 
@@ -23,8 +11,6 @@ export type Fake = Io & {
   spawned: ProcessSpawnRequest[]
   killed: number
   notified: string[]
-  agentSpawns: AgentSpawnArgs[]
-  sent: SessionSendArgs[]
   /** Runs every timer due by `ms` from now. */
   advance: (ms: number) => void
 }
@@ -34,8 +20,6 @@ type Options = {
   dirs?: string[]
   spawn?: (r: ProcessSpawnRequest, n: number) => Script
   run?: (argv: readonly string[]) => ProcessRunResult
-  agents?: AgentInfo[]
-  spawnAgent?: (a: AgentSpawnArgs) => AgentSpawnResult
   notifyFails?: string
 }
 
@@ -88,8 +72,6 @@ export function fakeIo(o: Options = {}): Fake {
     spawned: [],
     killed: 0,
     notified: [],
-    agentSpawns: [],
-    sent: [],
     advance(ms) {
       clock += ms
       for (const t of timers) {
@@ -148,18 +130,6 @@ export function fakeIo(o: Options = {}): Fake {
     },
     async sleep(ms) {
       clock += ms
-    },
-    async agents() {
-      return o.agents ?? []
-    },
-    async spawnAgent(a) {
-      fake.agentSpawns.push(a)
-      if (o.spawnAgent === undefined) throw new Error('no spawnAgent handler')
-      return o.spawnAgent(a)
-    },
-    async send(a): Promise<SessionSendResult> {
-      fake.sent.push(a)
-      return { isDelivered: true }
     },
     async notify(text) {
       if (o.notifyFails !== undefined) throw new Error(o.notifyFails)

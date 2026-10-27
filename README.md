@@ -1,6 +1,6 @@
 # cc-crew
 
-Independent reviews for Claude Code, from Codex, Antigravity and Claude subagents. Each gets a separate conversation,
+Independent reviews for Claude Code, from Codex, Antigravity and Claude. Each gets a separate conversation,
 a self-contained brief and a set of paths it may read. Reports go into the project, and background results come back
 into the session through cc-conversation.
 
@@ -11,8 +11,8 @@ Provided as is.
 - Claude Code 2.1.296 or later. The sidebar needs fullscreen rendering; outside fullscreen nothing is drawn.
 - [cc-sidebar](https://github.com/wfthkttn/cc-sidebar) and
   [cc-conversation](https://github.com/wfthkttn/cc-conversation).
-- The Codex CLI for Codex reviewers, and for the sandbox around Claude reviewers' shell commands on Unix, signed in
-  once with `codex login --device-auth`.
+- The Codex CLI for Codex reviewers, signed in once with `codex login --device-auth`.
+- Claude Code itself on the PATH (or named by `claude_bin`), signed in to Claude, for the Claude reviewer.
 - The Antigravity CLI, `agy`, for Antigravity reviewers, signed in once by running `agy` in a terminal.
 - Bash for reading Codex's model catalog; on Windows, Git Bash.
 
@@ -59,11 +59,13 @@ relative to the project. Secret filenames such as `.env`, private-key files and 
 name; this does not find secrets stored under other names.
 
 Codex runs with a read-only filesystem profile. Antigravity gets a restricted tool list and path deny rules.
-Claude's Read calls are checked against resolved paths, and its shell commands run through Codex's sandbox. On
-Windows, Claude reviewers have listing and search tools instead of a shell. A reviewer from `reviewers.json` runs
-Claude Code headless (`-p --restricted --safe-mode`) with Read, Grep and Glob only, in a working folder of its own,
-the read paths added beside it, and deny rules for secret files and for Claude's own session records and
-credentials; none of your CLAUDE.md, settings files, plugins, hooks or MCP servers load into it.
+The Claude reviewer, like a reviewer from `reviewers.json`, runs Claude Code headless (`-p --restricted --safe-mode`)
+with Read, Grep and Glob only, in a working folder of its own, the read paths added beside it, and deny rules for
+secret files and for Claude's own session records and credentials; none of your CLAUDE.md, settings files, plugins,
+hooks or MCP servers load into it. Its child runs on Claude whichever backend the session itself uses: the variables a
+wrapper such as `zai` sets to point Claude Code at another endpoint (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `API_TIMEOUT_MS`) are emptied for it. A reviewer
+from `reviewers.json` keeps the environment its own command sets.
 
 ### More reviewers
 
@@ -107,12 +109,12 @@ again on resume.
 
 ## Settings
 
-- `codex_bin` and `agy_bin`: command or absolute path, default `codex` and `agy`.
+- `codex_bin`, `agy_bin` and `claude_bin`: command or absolute path, default `codex`, `agy` and `claude`.
 - `reviewers`: default provider list; it can name reviewers from `reviewers.json`.
 - `codex_model`, `agy_model`, `claude_model`: default models. Empty leaves the choice to the provider; Claude defaults
   to `opus`.
 - `codex_effort`, `agy_effort`, `claude_effort`: default effort. Codex and Claude default to `medium`; Antigravity is
-  empty. Claude's effort is set for its reviewer types, rather than per call.
+  empty; empty leaves the effort to the provider's own default.
 - `reviewer_rules`: absolute paths of Markdown files added to every reviewer's instructions.
 - `timeout_s`: reviewer timeout, default 1800 seconds.
 - `limit_group_usd`: fallback spending limit for groups without one in the catalog.

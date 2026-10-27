@@ -6,14 +6,19 @@ export type BuiltIn = (typeof BUILT_IN)[number]
 /** A built-in, or a reviewer the person's reviewers.json names. */
 export type Provider = string
 
-/** How a reviewer runs: a built-in's own way, or a `claude -p` child for a reviewer from reviewers.json. */
-export type Kind = BuiltIn | 'claude-p'
+/** How a reviewer runs: Codex's or Antigravity's own way, or a `claude -p` child (the Claude reviewer, and those of reviewers.json). */
+export type Kind = Exclude<BuiltIn, 'claude'> | 'claude-p'
+
+/** The Claude reviewer's model when neither the call nor the settings name one. */
+export const DEFAULT_MODEL = 'opus'
 
 export type Choice = { model?: string; effort?: string }
 
 export type Settings = {
   codexBin: string
   agyBin: string
+  /** The command of the Claude reviewer, a `claude -p` child. */
+  claudeBin: string
   /** Checked against the known reviewers when a review uses them: reviewers.json is read at session start. */
   reviewers: Provider[]
   /** What a reviewer of each built-in runs when its call leaves the model or effort out. */
@@ -53,6 +58,7 @@ export function settingsFrom(options: PluginOptions, claudeConfigDir: string): S
     claudeConfigDir,
     codexBin: options.codex_bin as string,
     agyBin: options.agy_bin as string,
+    claudeBin: options.claude_bin as string,
     reviewers: [...(options.reviewers as readonly string[])],
     defaults: {
       codex: choice(options.codex_model, options.codex_effort),

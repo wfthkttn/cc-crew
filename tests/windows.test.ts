@@ -3,9 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import * as agy from '../hooks/antigravity.ts'
 import { homeEnv } from '../hooks/antigravity.ts'
-import * as claude from '../hooks/claude.ts'
 import * as codex from '../hooks/codex.ts'
-import { listing, search } from '../hooks/files.ts'
 import type { Io } from '../hooks/io.ts'
 import type { Job } from '../hooks/job.ts'
 import { findSecrets, isInside, isWindowsPath, join, nameOf, namesOf, otherDrives, parentOf, resolveRoots, siblingsOf } from '../hooks/scope.ts'
@@ -64,9 +62,6 @@ function windowsDisk(dirs: string[], files: Record<string, string>, links: strin
     now: async () => 0,
     after: () => ({ cancel: () => {} }),
     sleep: async () => {},
-    agents: async () => [],
-    spawnAgent: unused,
-    send: unused,
     notify: unused,
   }
 }
@@ -124,74 +119,10 @@ test("Antigravity's closed paths on Windows run from the drive root, and other d
   expect(homeEnv('/h')).toEqual({ HOME: '/h' })
 })
 
-const fence = (roots: string[], secrets: string[] = [`${P}\\.env`]): claude.Fence => ({ roots, files: [], secrets, codexBin: 'codex' })
-
-test("a Claude reviewer's Read on Windows is held to its roots without case and keeps out secrets", async () => {
-  const io = windowsDisk(DIRS, FILES)
-  expect(await claude.readRefusal(io, fence([P]), 'c:\\users\\u\\proj\\main.ts')).toBeUndefined()
-  expect(await claude.readRefusal(io, fence([P]), 'C:/Users/u/proj/.ENV')).toContain('secret')
-  expect(await claude.readRefusal(io, fence([P]), 'C:\\Users\\u\\notes.txt')).toContain('outside')
-})
-
-test("on Windows the Claude reviewer lists and searches with crew's tools in place of a shell", async () => {
-  const [spec, web] = claude.agentSpecs('SYS', 'C:\\c\\approved', undefined, false)
-  expect(spec!.tools).toEqual(['Read', 'mcp__cc-crew__reviewer_list', 'mcp__cc-crew__reviewer_search'])
-  expect(web!.tools).toEqual(['Read', 'mcp__cc-crew__reviewer_list', 'mcp__cc-crew__reviewer_search', 'WebSearch', 'WebFetch'])
-  expect(claude.agentSpecs('SYS', '/c/approved', undefined, true)[0]!.tools).toEqual(['Read', 'Bash'])
-  expect(claude.approvedMark('C:\\c\\approved', 'toolu_1')).toBe('C:\\c\\approved\\toolu_1')
-})
-
-test("the reviewer's listing stays inside its roots, shows links unfollowed and leaves .git closed", async () => {
-  const io = windowsDisk(DIRS, FILES, [`${P}\\sub\\out`])
-  const listed = await listing(io, fence([P]), 'c:/users/u/proj', 3)
-  expect(listed).toEqual({
-    text: [P, '.env (12 bytes)', '.git/', 'main.ts (28 bytes)', 'sub/', 'sub/b.ts (18 bytes)', 'sub/out (link, not followed)'].join('\n'),
-  })
-  expect(await listing(io, fence([P]), 'C:\\Users\\u', 1)).toEqual({ refusal: 'C:\\Users\\u is outside the paths this review may read' })
-  expect(await listing(io, fence([P]), `${P}\\main.ts`, 1)).toEqual({ refusal: `${P}\\main.ts is not a folder` })
-})
-
-test("the reviewer's search reads no secret, .git or outside file", async () => {
-  const io = windowsDisk(DIRS, FILES)
-  expect(await search(io, fence([P]), { pattern: 'token', path: P, ignoreCase: false })).toEqual({
-    text: [`${P}\\main.ts:2: const token = 2`, `${P}\\sub\\b.ts:1: token here`].join('\n'),
-  })
-  expect(await search(io, fence([P]), { pattern: 'TOKEN', path: `${P}\\sub`, ignoreCase: true })).toEqual({ text: `${P}\\sub\\b.ts:1: token here` })
-  expect(await search(io, fence([P]), { pattern: 'x', path: `${P}\\.env`, ignoreCase: false })).toEqual({ refusal: `${P}\\.env is a secret file` })
-  expect(await search(io, fence([P]), { pattern: 'token', path: 'C:\\Users\\u\\notes.txt', ignoreCase: false })).toEqual({
-    refusal: 'C:\\Users\\u\\notes.txt is outside the paths this review may read',
-  })
-  const bad = await search(io, fence([P]), { pattern: '(', path: P, ignoreCase: false })
-  expect('refusal' in bad && bad.refusal.startsWith('the pattern is not a regular expression')).toBe(true)
-})
-
 test('on Windows a secret is known by its name in any case', async () => {
   const files = { ...FILES, [`${P}\\sub\\Server.PEM`]: 'pem', [`${P}\\ID_RSA`]: 'key' }
   const io = windowsDisk(DIRS, files)
   expect(await findSecrets(io, [P], [])).toEqual([`${P}\\.env`, `${P}\\ID_RSA`, `${P}\\sub\\Server.PEM`])
-  expect(await claude.readRefusal(io, fence([P], []), `${P}\\sub\\Server.PEM`)).toContain('secret')
-  expect(await search(io, fence([P], []), { pattern: 'pem|key', path: P, ignoreCase: false })).toEqual({ text: '(no matches)' })
-})
-
-test("on Windows git's folder stays closed by any spelling", async () => {
-  const dirs = [...DIRS.filter(d => d !== `${P}\\.git`), `${P}\\.Git`]
-  const files = { [`${P}\\main.ts`]: 'token', [`${P}\\.Git\\config`]: 'token in git' }
-  const io = windowsDisk(dirs, files)
-  expect(await search(io, fence([P], []), { pattern: 'token', path: P, ignoreCase: false })).toEqual({ text: `${P}\\main.ts:1: token` })
-  const listed = await listing(io, fence([P], []), P, 3)
-  expect('text' in listed && listed.text.includes('config')).toBe(false)
-})
-
-test('a search refuses a pattern that backtracks without end, and a folder it cannot list is noted, not fatal', async () => {
-  const io = windowsDisk(DIRS, FILES)
-  const nested = await search(io, fence([P]), { pattern: '(a+)+$', path: P, ignoreCase: false })
-  expect('refusal' in nested && nested.refusal.includes('repeats a group')).toBe(true)
-  const shaky: Io = { ...io, list: async p => (p.endsWith('sub') ? Promise.reject(new Error('EACCES')) : io.list(p)) }
-  expect(await search(shaky, fence([P]), { pattern: 'token', path: P, ignoreCase: false })).toEqual({
-    text: [`${P}\\main.ts:2: const token = 2`, '(1 folders could not be listed)'].join('\n'),
-  })
-  const listed = await listing(shaky, fence([P]), P, 2)
-  expect('text' in listed && listed.text.includes('sub/ (could not be listed: Error: EACCES)')).toBe(true)
 })
 
 test('an Antigravity reviewer starts on Windows, its sign-in checked under its own home', async () => {

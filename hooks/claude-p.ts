@@ -5,7 +5,23 @@ import { describeEnd, run } from './proc.ts'
 import { FINDINGS_SCHEMA, parseFindings } from './prompt.ts'
 import { folderOf, isInside, isWindowsPath, join } from './scope.ts'
 
-const SIGNED_OUT = /\b401\b|authentication_error|invalid (x-)?api.?key|not logged in|please run \/login/i
+/**
+ * What a wrapper (zai, gpt) sets to point Claude Code at another backend. The Claude reviewer's child gets each of
+ * them empty, which Claude Code reads as unset, so it runs on Claude however the session was started.
+ */
+export const BACKEND_ENV = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'API_TIMEOUT_MS',
+]
+
+const SIGNED_OUT =/\b401\b|authentication_error|invalid (x-)?api.?key|not logged in|please run \/login/i
 const QUOTA = /\b429\b|rate.?limit|usage limit|quota|insufficient (balance|credit)/i
 
 /** A path as Claude Code's rules spell an absolute one: `//tmp/x`, and `//c/Users/x` for `C:\Users\x`. */
@@ -81,7 +97,7 @@ function watch(seen: Seen) {
   }
 }
 
-async function execute(io: Io, command: readonly string[], j: Omit<Job, 'task'>, stateDir: string, message: string, resume: string | undefined, configDir: string): Promise<Outcome> {
+async function execute(io: Io, command: readonly string[], j: Omit<Job, 'task'>, stateDir: string, message: string, resume: string | undefined, configDir: string, isClaude: boolean): Promise<Outcome> {
   const { dirs, closed } = await readDirs(io, j.roots, j.files)
   await io.write(`${j.dir}/settings.json`, settings(j, closed, configDir))
   await io.write(`${j.dir}/system.md`, j.system)
@@ -117,7 +133,8 @@ async function execute(io: Io, command: readonly string[], j: Omit<Job, 'task'>,
   const cwd = await workDir(io, stateDir)
   const seen: Seen = {}
   // the person's mods, which --safe-mode keeps from running, aren't handed on either
-  const r = await run(io, { argv, cwd, input: message, env: { CLAUDE_CODE_PLUGIN_DIRS: '' } }, { timeoutMs: j.timeoutMs, signal: j.signal, onLine: watch(seen) })
+  const env = { CLAUDE_CODE_PLUGIN_DIRS: '', ...(isClaude ? Object.fromEntries(BACKEND_ENV.map(name => [name, ''])) : {}) }
+  const r = await run(io, { argv, cwd, input: message, env }, { timeoutMs: j.timeoutMs, signal: j.signal, onLine: watch(seen) })
   await io.write(`${j.dir}/events.jsonl`, r.stdout)
   await io.write(`${j.dir}/stderr.txt`, r.stderr)
   const res = seen.result
@@ -136,11 +153,15 @@ async function execute(io: Io, command: readonly string[], j: Omit<Job, 'task'>,
   return { ...base, status: 'failed', text, detail: res === undefined ? `no result from ${command[0]}: ${detail}` : `${String(res.subtype)}: ${detail}` }
 }
 
-/** `command`: the program and its first arguments, from reviewers.json; `configDir`: Claude Code's config folder. */
-export async function review(io: Io, command: readonly string[], j: Job, configDir: string): Promise<Outcome> {
-  return execute(io, command, j, j.dir, j.task, undefined, configDir)
+/**
+ * `command`: the program and its first arguments, from reviewers.json or the `claude_bin` setting; `configDir`:
+ * Claude Code's config folder; `isClaude`: the built-in Claude reviewer, whose child runs on Claude whatever backend
+ * the session's wrapper chose.
+ */
+export async function review(io: Io, command: readonly string[], j: Job, configDir: string, isClaude: boolean): Promise<Outcome> {
+  return execute(io, command, j, j.dir, j.task, undefined, configDir, isClaude)
 }
 
-export async function followUp(io: Io, command: readonly string[], f: FollowUp, configDir: string): Promise<Outcome> {
-  return execute(io, command, f, f.stateDir, f.message, f.continueId, configDir)
+export async function followUp(io: Io, command: readonly string[], f: FollowUp, configDir: string, isClaude: boolean): Promise<Outcome> {
+  return execute(io, command, f, f.stateDir, f.message, f.continueId, configDir, isClaude)
 }

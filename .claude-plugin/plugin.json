@@ -1,6 +1,6 @@
 {
   "name": "cc-crew",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reviews by other harnesses' models (Codex, Antigravity) and Claude, under one tool with enforced read limits",
   "author": { "name": "alex" },
   "dependencies": ["cc-conversation", "cc-sidebar"],
@@ -48,6 +48,12 @@
       "description": "Effort an Antigravity reviewer runs at when the call names none; empty for the model's default",
       "default": ""
     },
+    "claude_bin": {
+      "type": "string",
+      "title": "Claude Code",
+      "description": "Command or absolute path of Claude Code, which runs the Claude reviewer headless",
+      "default": "claude"
+    },
     "claude_model": {
       "type": "string",
       "title": "Claude reviewer model",
@@ -57,7 +63,7 @@
     "claude_effort": {
       "type": "string",
       "title": "Claude reviewer effort",
-      "description": "low, medium, high, xhigh or max for every Claude reviewer; empty for the session's effort",
+      "description": "low, medium, high, xhigh or max for every Claude reviewer; empty for Claude Code's default",
       "default": "medium"
     },
     "reviewer_rules": {

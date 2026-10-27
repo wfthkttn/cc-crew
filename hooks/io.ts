@@ -1,7 +1,4 @@
 import type {
-  AgentInfo,
-  AgentSpawnArgs,
-  AgentSpawnResult,
   FsEntry,
   FsStat,
   FsStatOptions,
@@ -11,8 +8,6 @@ import type {
   ProcessSpawnChunk,
   ProcessSpawnRequest,
   ProcessSpawnResult,
-  SessionSendArgs,
-  SessionSendResult,
   Timer,
 } from 'claude-code'
 
@@ -28,9 +23,6 @@ export type Io = {
   now: () => Promise<number>
   after: (ms: number, fn: () => void) => Timer
   sleep: (ms: number) => Promise<void>
-  agents: () => Promise<AgentInfo[]>
-  spawnAgent: (args: AgentSpawnArgs) => Promise<AgentSpawnResult>
-  send: (args: SessionSendArgs) => Promise<SessionSendResult>
   /** Posts to this session's thread on the person's messenger, with sound. */
   notify: (text: string) => Promise<void>
 }

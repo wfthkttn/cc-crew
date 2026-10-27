@@ -5,7 +5,6 @@ import { ClaudeAgents } from './agents.ts'
 import { wrap } from './detail.ts'
 import { type ChangeSpec, changeOf } from './changes.ts'
 import { homeEnv as agyHomeEnv } from './antigravity.ts'
-import * as claude from './claude.ts'
 import { BUILT_IN, type Choice, type Provider, type Settings, isBuiltIn, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
 import { type Catalog, groupOf, loadCatalog, modelKey, readCodexCatalog, withCodex } from './catalog.ts'
@@ -21,7 +20,6 @@ import {
   type ReviewerSpec,
   type Run,
   ask,
-  beginClaude,
   continueOne,
   execute,
   keysFor,
@@ -31,14 +29,13 @@ import {
   stopReviewer,
   summary,
 } from './runs.ts'
-import * as fileTools from './files.ts'
 import { type ReadSpec, findSecrets, folderOf, isAbsolute, isInside, isWindowsPath, join, namesOf, resolveRoots } from './scope.ts'
 import { bashUnder } from './shell.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens } from './usage.ts'
 import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf, usageDetail } from './views.ts'
 
-const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer subagent. Use it for a second opinion on code, a change, a design or a document.
+const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer (Claude Code run headless). Use it for a second opinion on code, a change, a design or a document.
 
 Each reviewer reads only what \`read\` allows (the project by default), secret files (.env and the like) are always blocked, the rest of the disk is closed, and nothing is written except the reports. It runs in the background by default: you get the run id at once and a message with every reviewer's result when all are done. Do not poll or wait for it.
 
@@ -46,7 +43,7 @@ Brief it like a colleague who just walked into the room: the reviewers know noth
 
 Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out or out of quota is reported loudly and the others carry on.
 
-Models: a reviewer whose call names no model or effort runs the configured default for its provider. codex takes its own model names and effort low|medium|high|xhigh|max|ultra. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku; its effort is the configured one, else the session's, and a call cannot set it.`
+Models: a reviewer whose call names no model or effort runs the configured default for its provider. codex takes its own model names and effort low|medium|high|xhigh|max|ultra. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku and effort low|medium|high|xhigh|max, and runs on Claude whatever backend this session uses.`
 
 function reviewDescription(custom: readonly CustomReviewer[]): string {
   if (custom.length === 0) return REVIEW_DESCRIPTION
@@ -123,7 +120,6 @@ let system = REVIEWER_PROMPT
 let cacheDir = ''
 /** Set at session start. */
 let isWindows = false
-const approvedDir = () => join(cacheDir, 'approved')
 
 const TAB_ID = 'crew'
 const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
@@ -383,9 +379,6 @@ function ioOf($: EngineInterface): Io {
     now: () => $.clock.now(),
     after: (ms, fn) => $.clock.after(ms, fn),
     sleep: ms => $.clock.sleep(ms),
-    agents: () => $.agent.list(),
-    spawnAgent: args => $.agent.spawn(args),
-    send: args => $.session.send(args),
     notify: text => $.conversation.tell({ text: `crew: ${text}`, group: 'attention' }),
   }
 }
@@ -448,14 +441,13 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
   }
   const task = taskText({ brief, roots, web, ...(change !== undefined ? { changes: change } : {}) })
   await $.fs.write(`${run.reportDir}/brief.md`, task)
-  const begun = await beginClaude(io, run, settings, system, task)
   if (!background) {
-    await execute(io, run, settings, system, task, cacheDir, alert, begun, signal)
+    await execute(io, run, settings, system, task, cacheDir, alert, signal)
     return summary(run)
   }
   $.clock.after(0, () =>
     void finish($, `review ${id}`, async () => {
-      await execute(io, run, settings, system, task, cacheDir, alert, begun)
+      await execute(io, run, settings, system, task, cacheDir, alert)
       return `review finished.\n${summary(run)}`
     }),
   )
@@ -508,15 +500,6 @@ function fields(e: unknown): Fields {
   return e as Fields
 }
 
-/** The fence of the crew reviewer making the call, or why the call is refused: the file tools are theirs alone. */
-async function reviewerFence($: EngineInterface, f: Fields): Promise<claude.Fence | string> {
-  if (typeof f.agentId !== 'string') return "crew: this tool is for crew's reviewers only"
-  const fence = await claude.fenceFor(ioOf($), f.agentId)
-  if (fence === 'not-ours') return "crew: this tool is for crew's reviewers only"
-  if (fence === undefined) return 'crew: this reviewer has no read limits in place'
-  return fence
-}
-
 function answer(work: Promise<string>) {
   return work.then(
     text => ({ result: text }),
@@ -536,12 +519,7 @@ export const register: Register = (on, options) => {
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
     custom = await loadReviewers(ioOf($), home)
-    for (const spec of claude.agentSpecs(system, approvedDir(), settings.defaults.claude?.effort, !isWindows)) await $.agent.register(spec)
     await $.tool.register({ name: 'review', description: reviewDescription(custom), inputSchema: reviewSchema(providers()), isDeferred: false })
-    if (isWindows) {
-      await $.tool.register({ name: fileTools.LIST_TOOL, description: fileTools.LIST_DESCRIPTION, inputSchema: fileTools.LIST_SCHEMA })
-      await $.tool.register({ name: fileTools.SEARCH_TOOL, description: fileTools.SEARCH_DESCRIPTION, inputSchema: fileTools.SEARCH_SCHEMA })
-    }
     await $.tool.register({
       name: 'review_continue',
       description: 'Ask a reviewer of a finished crew review a follow-up, in its own conversation. Background by default: the answer arrives as a message.',
@@ -579,8 +557,6 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    // crew's own reviewers show under their run and count against the review limits.
-    if (e.subagentType.startsWith('cc-crew:')) return next(e)
     // An agent type with a model of its own is gated on the asked or the parent's: the plugin API does not tell its type's model.
     const refusal = agentRefusal(currentLimits(), currentSpent(), groupFor('claude', e.model ?? e.parentModel))
     if (refusal !== undefined) return { deny: `crew: ${refusal}` }
@@ -689,60 +665,9 @@ export const register: Register = (on, options) => {
     return filled as typeof tree
   })
 
-  on('agent.offer', { agent: 'cc-crew:reviewer' }, () => ({ isOffered: claude.isOffered() }))
-  on('agent.offer', { agent: 'cc-crew:reviewer-web' }, () => ({ isOffered: claude.isOffered() }))
-
   on('tool.call', { tool: 'mcp__cc-crew__review' }, ($, e, next) => answer(startReview($, fields(e), next.signal)))
   on('tool.call', { tool: 'mcp__cc-crew__review_continue' }, ($, e, next) => answer(continueReview($, fields(e), next.signal)))
   on('tool.call', { tool: 'mcp__cc-crew__review_status' }, ($, e) => answer(status($, fields(e))))
-
-  on('tool.call', { tool: 'Read' }, async ($, e, next) => {
-    if (e.agentId === undefined) return next(e)
-    const fence = await claude.fenceFor(ioOf($), e.agentId)
-    if (fence === 'not-ours') return next(e)
-    if (fence === undefined) return { deny: 'crew: this reviewer has no read limits in place' }
-    const refusal = await claude.readRefusal(ioOf($), fence, e.file_path)
-    if (refusal !== undefined) return { deny: `crew: ${refusal}` }
-    await $.fs.write(claude.approvedMark(approvedDir(), e.tool_use_id), '')
-    return next(e)
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'crew: the read guard failed' }))
-
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (e.agentId === undefined) return next(e)
-    const fence = await claude.fenceFor(ioOf($), e.agentId)
-    if (fence === 'not-ours') return next(e)
-    if (fence === undefined) return { deny: 'crew: this reviewer has no read limits in place' }
-    if (isWindows) return { deny: 'crew: a reviewer has no shell on Windows; it lists and searches with its own tools' }
-    const command = claude.fencedCommand(fence, e.command)
-    if (command === undefined) return { deny: 'crew: this review may read nothing on disk' }
-    await $.fs.write(claude.approvedMark(approvedDir(), e.tool_use_id), '')
-    return next({ ...e, command, run_in_background: false })
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'crew: the shell guard failed' }))
-
-  on('tool.call', { tool: `mcp__cc-crew__${fileTools.LIST_TOOL}` }, async ($, e) => {
-    const f = fields(e)
-    const fence = await reviewerFence($, f)
-    if (typeof fence === 'string') return { deny: fence }
-    if (typeof f.path !== 'string') return { deny: 'crew: path must be a string' }
-    const depth = typeof f.depth === 'number' ? f.depth : undefined
-    const listed = await fileTools.listing(ioOf($), fence, f.path, depth)
-    return 'refusal' in listed ? { deny: `crew: ${listed.refusal}` } : { result: listed.text }
-  }).catch(($, e, next) => ({ deny: `crew: the listing failed (${next.error.kind}): ${next.error.message}` }))
-
-  on('tool.call', { tool: `mcp__cc-crew__${fileTools.SEARCH_TOOL}` }, async ($, e) => {
-    const f = fields(e)
-    const fence = await reviewerFence($, f)
-    if (typeof fence === 'string') return { deny: fence }
-    if (typeof f.pattern !== 'string' || typeof f.path !== 'string') return { deny: 'crew: pattern and path must be strings' }
-    const found = await fileTools.search(ioOf($), fence, { pattern: f.pattern, path: f.path, ignoreCase: f.ignore_case === true })
-    return 'refusal' in found ? { deny: `crew: ${found.refusal}` } : { result: found.text }
-  }).catch(($, e, next) => ({ deny: `crew: the search failed (${next.error.kind}): ${next.error.message}` }))
-
-  on('tool.check', async ($, e, next) => {
-    if (e.agentId === undefined || (e.tool !== 'Read' && e.tool !== 'Bash' && !claude.FILE_TOOLS.includes(e.tool))) return next(e)
-    if (!claude.fences.has(e.agentId)) return next(e)
-    return { decision: 'allow', reason: 'crew: a fenced reviewer call' }
-  })
 
   on('turn.complete', async ($, e, next) => {
     const tokens = e.usage === undefined ? undefined : claudeTokens(e.usage)
@@ -755,7 +680,6 @@ export const register: Register = (on, options) => {
       }
       await keep($)
     } else {
-      claude.settle(e.agentId, { answer: e.answer, reason: e.reason, usage: e.usage })
       if (claudeAgents.finished(e.agentId, e.reason === 'answer', tokens, await $.clock.now())) await keep($)
     }
     return next(e)

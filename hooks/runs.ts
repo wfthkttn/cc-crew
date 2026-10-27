@@ -1,10 +1,9 @@
 import type { Io } from './io.ts'
 
 import * as agy from './antigravity.ts'
-import * as claude from './claude.ts'
 import * as claudeP from './claude-p.ts'
 import * as codex from './codex.ts'
-import { type BuiltIn, type Kind, type Provider, type Settings, isBuiltIn } from './config.ts'
+import type { Kind, Provider, Settings } from './config.ts'
 import type { FollowUp, Job, Outcome, Preflight, Status } from './job.ts'
 import { sum } from './limits.ts'
 import { renderFindings } from './prompt.ts'
@@ -14,12 +13,14 @@ import { type Tokens, tokensOf } from './usage.ts'
 export type ReviewerSpec = { provider: Provider; model?: string; effort?: string; command?: string[] }
 
 export function kindOf(r: ReviewerSpec): Kind {
-  if (r.command !== undefined) return 'claude-p'
-  if (!isBuiltIn(r.provider)) throw new Error(`crew: reviewer ${r.provider} has no command and is no built-in`)
-  return r.provider satisfies BuiltIn
+  if (r.provider === 'claude' || r.command !== undefined) return 'claude-p'
+  if (r.provider === 'codex' || r.provider === 'antigravity') return r.provider
+  throw new Error(`crew: reviewer ${r.provider} has no command and is no built-in`)
 }
 
-function commandOf(r: ReviewerSpec): string[] {
+/** The Claude reviewer runs the `claude_bin` setting; the others, the command their reviewers.json entry gave. */
+function commandOf(r: ReviewerSpec, s: Settings): string[] {
+  if (r.provider === 'claude') return [s.claudeBin]
   if (r.command === undefined) throw new Error(`crew: reviewer ${r.provider} has no command`)
   return r.command
 }
@@ -82,7 +83,7 @@ function disarm(run: Run, r: ReviewerState): void {
   stops.delete(stopKey(run, r))
 }
 
-/** Stops a running reviewer: a child process is killed, a Claude reviewer's calls are refused from then on. */
+/** Stops a running reviewer: its child process is killed. */
 export function stopReviewer(runId: string, key: string): boolean {
   const stop = stops.get(`${runId}/${key}`)
   if (stop === undefined) return false
@@ -142,7 +143,6 @@ async function preflight(io: Io, s: Settings, kind: Kind, cacheDir: string): Pro
       return codex.preflight(io, s.codexBin)
     case 'antigravity':
       return agy.preflight(io, s.agyBin, `${cacheDir}/agy-home`)
-    case 'claude':
     case 'claude-p':
       return { ok: true }
   }
@@ -198,33 +198,6 @@ function apply(r: ReviewerState, o: Outcome, endedAt: number): void {
 /** Tells the person a provider needs them; answers why the message failed, or undefined. */
 export type Alert = (io: Io, provider: Provider, detail: string) => Promise<string | undefined>
 
-/**
- * Starts the run's Claude reviewers. Called inside the tool call, before the rest of the run
- * may go on in the background (`claude.begin` says why).
- */
-export async function beginClaude(
-  io: Io,
-  run: Run,
-  s: Settings,
-  system: string,
-  task: string,
-): Promise<Map<string, claude.Pending>> {
-  const begun = new Map<string, claude.Pending>()
-  for (const r of run.reviewers) {
-    if (r.provider !== 'claude') continue
-    const j = job(run, r, system, task, s)
-    try {
-      const pending = await claude.begin(io, j, s.codexBin, `crew review: ${run.description}`)
-      stops.set(stopKey(run, r), pending.stop)
-      begun.set(r.key, pending)
-    } catch (err) {
-      const detail = `the reviewer agent did not start: ${String(err)}`
-      begun.set(r.key, { wait: async () => ({ status: 'failed', text: '', model: r.model ?? claude.DEFAULT_MODEL, detail }), stop: () => {} })
-    }
-  }
-  return begun
-}
-
 async function runOne(
   io: Io,
   run: Run,
@@ -234,12 +207,11 @@ async function runOne(
   task: string,
   cacheDir: string,
   alert: Alert,
-  begun: ReadonlyMap<string, claude.Pending>,
   signal?: AbortSignal,
 ): Promise<void> {
   let o: Outcome
   const kind = kindOf(r)
-  const stopped = kind === 'claude' ? signal : arming(run, r, signal)
+  const stopped = arming(run, r, signal)
   const pre = await preflight(io, s, kind, cacheDir)
   if (!pre.ok) {
     o = { status: pre.status, text: '', model: r.model ?? 'default', detail: pre.detail }
@@ -253,14 +225,8 @@ async function runOne(
         case 'antigravity':
           o = await agy.review(io, s.agyBin, j)
           break
-        case 'claude': {
-          const pending = begun.get(r.key)
-          if (pending === undefined) throw new Error(`crew: the Claude reviewer ${r.key} was not started inside the tool call`)
-          o = await pending.wait()
-          break
-        }
         case 'claude-p':
-          o = await claudeP.review(io, commandOf(r), j, s.claudeConfigDir)
+          o = await claudeP.review(io, commandOf(r, s), j, s.claudeConfigDir, r.provider === 'claude')
           break
       }
     } catch (err) {
@@ -284,18 +250,17 @@ export async function execute(
   task: string,
   cacheDir: string,
   alert: Alert,
-  begun: ReadonlyMap<string, claude.Pending>,
   signal?: AbortSignal,
 ): Promise<void> {
   runs.set(run.id, run)
   await save(io, run)
-  await Promise.all(run.reviewers.map(r => runOne(io, run, r, s, system, task, cacheDir, alert, begun, signal)))
+  await Promise.all(run.reviewers.map(r => runOne(io, run, r, s, system, task, cacheDir, alert, signal)))
   await save(io, run)
 }
 
-export type Asked = { f: FollowUp; n: string; pending?: claude.Pending }
+export type Asked = { f: FollowUp; n: string }
 
-/** Marks the reviewer running and, for a Claude reviewer, sends the message: inside the tool call. */
+/** Marks the reviewer running and readies its follow-up. */
 export async function ask(
   io: Io,
   run: Run,
@@ -317,10 +282,7 @@ export async function ask(
   r.status = 'running'
   r.startedAt = await io.now()
   await save(io, run)
-  if (r.provider !== 'claude') return { f: { ...f, signal: arming(run, r, signal) }, n }
-  const pending = await claude.beginFollowUp(io, f, s.codexBin)
-  stops.set(stopKey(run, r), pending.stop)
-  return { f, n, pending }
+  return { f: { ...f, signal: arming(run, r, signal) }, n }
 }
 
 export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Settings, asked: Asked, alert: Alert): Promise<void> {
@@ -335,12 +297,8 @@ export async function continueOne(io: Io, run: Run, r: ReviewerState, s: Setting
       case 'antigravity':
         o = await agy.followUp(io, s.agyBin, f)
         break
-      case 'claude':
-        if (asked.pending === undefined) throw new Error(`crew: the follow-up to ${r.key} was not sent inside the tool call`)
-        o = await asked.pending.wait()
-        break
       case 'claude-p':
-        o = await claudeP.followUp(io, commandOf(r), f, s.claudeConfigDir)
+        o = await claudeP.followUp(io, commandOf(r, s), f, s.claudeConfigDir, r.provider === 'claude')
         break
     }
   } catch (err) {
