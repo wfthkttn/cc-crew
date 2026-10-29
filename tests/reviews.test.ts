@@ -1,3 +1,4 @@
+import type { ProvidersReadSpec } from 'cc-providers'
 import { expect, test } from 'claude-code/testing'
 
 import { FINDINGS_SCHEMA } from '../hooks/prompt.ts'
@@ -107,6 +108,24 @@ test('a follow-up goes to a finished reviewer from its own session, after the li
   expect(report).toContain('## Answer (not in the findings format)\n\nY is fine.')
   const refusing = fakeProviders({ refuse: { codex: 'codex switched off for this session' } })
   await expect(reviews.ask(io, agents.port, refusing, alert, 's1', review.id, 'codex-default', 'And Z?')).rejects.toThrow('codex: codex switched off for this session')
+})
+
+test('a change is read in the first read path the call names, though the paths resolve sorted', async () => {
+  const io = fakeIo({
+    run: argv => {
+      if (argv[2] !== '/r/zeta') throw new Error(`git ran in ${argv[2]}`)
+      const args = argv.slice(3).join(' ')
+      if (args === 'diff HEAD --name-only') return ok('a.ts\n')
+      if (args === 'ls-files --others --exclude-standard') return ok('')
+      if (args === 'diff HEAD -- a.ts') return ok('+a\n')
+      throw new Error(`unexpected git ${args}`)
+    },
+  })
+  const providers = { ...fakeProviders(), roots: async ({ read }: { read: ProvidersReadSpec }) => ({ roots: [...(read as string[])].sort(), files: [] }) }
+  const agents = fakeAgents()
+  const review = await makeReviews(CACHE).begin(io, agents.port, providers, async () => undefined, input({ specs: [{ provider: 'codex' }], read: ['/r/zeta', '/r/alpha'], changes: 'uncommitted' }))
+  expect(review.roots).toEqual(['/r/alpha', '/r/zeta'])
+  expect(review.changes).toBe('The uncommitted changes (staged and unstaged) in `/r/zeta`')
 })
 
 test("a change's diff leaves out the files whose names providers marks secret", async () => {

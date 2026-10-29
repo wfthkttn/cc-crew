@@ -1,7 +1,7 @@
 import type { AgentsJob, AgentsOutcome, AgentsRun } from 'cc-agents'
 import type { ProvidersReadSpec } from 'cc-providers'
 
-import { type ChangeSpec, changeOf } from './changes.ts'
+import { type Change, type ChangeSpec, changeOf } from './changes.ts'
 import type { Io } from './io.ts'
 import { folderOf } from './paths.ts'
 import { FINDINGS_SCHEMA, parseFindings, renderFindings, taskText } from './prompt.ts'
@@ -244,10 +244,16 @@ export function makeReviews(cacheDir: string) {
         const { refusal } = await providers.refusal({ session: input.session, key })
         if (refusal !== null) throw new Refused(`${spec.provider}: ${refusal}`)
       }
-      const { roots, files } = await providers.roots({ read: input.read, project: input.project })
-      if (input.changes !== undefined && roots[0] === undefined) throw new Refused('changes needs a read path holding the repository')
-      const secretsOf = async (paths: string[]) => (await providers.secretPaths({ paths })).secret
-      const change = input.changes !== undefined && roots[0] !== undefined ? await changeOf(io, folderOf(roots[0], files), input.changes, secretsOf) : undefined
+      const { roots } = await providers.roots({ read: input.read, project: input.project })
+      let change: Change | undefined
+      if (input.changes !== undefined) {
+        // the repository is the first read path as the call names it: the resolved roots come back sorted
+        const first = input.read === 'none' ? undefined : await providers.roots({ read: input.read === 'project' ? 'project' : input.read.slice(0, 1), project: input.project })
+        const repo = first?.roots[0]
+        if (first === undefined || repo === undefined) throw new Refused('changes needs a read path holding the repository')
+        const secretsOf = async (paths: string[]) => (await providers.secretPaths({ paths })).secret
+        change = await changeOf(io, folderOf(repo, first.files), input.changes, secretsOf)
+      }
       const id = await newId(io)
       const keys = keysFor(input.specs)
       const review: Review = {
