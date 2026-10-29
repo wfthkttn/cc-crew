@@ -110,6 +110,59 @@ test('a follow-up goes to a finished reviewer from its own session, after the li
   await expect(reviews.ask(io, agents.port, refusing, alert, 's1', review.id, 'codex-default', 'And Z?')).rejects.toThrow('codex: codex switched off for this session')
 })
 
+test("a reviewer whose end comes before its start's answer keeps its report; one ended in its answer waits for its end", async () => {
+  const { io, agents, providers, alert, reviews } = setup()
+  const done = { status: 'ok' as const, text: JSON.stringify(FINDINGS), model: 'gpt-6.1-sol', continueId: 'th-1' }
+  let late: (() => Promise<unknown>) | undefined
+  const port = {
+    ...agents.port,
+    start: async (i: Parameters<typeof agents.port.start>[0]) => {
+      const run = await agents.port.start(i)
+      const ended = agents.end(run.id, done)
+      // the first reviewer's end arrives before its answer, the second's after it
+      if (i.label === 'codex-default') await reviews.ended(io, alert, ended, done)
+      else late = () => reviews.ended(io, alert, ended, done)
+      return ended
+    },
+  }
+  const review = await reviews.begin(io, port, providers, alert, input({ specs: [{ provider: 'codex' }, { provider: 'claude', model: 'opus' }] }))
+  expect(review.reviewers.map(r => [r.key, r.agent, r.findings])).toEqual([['codex-default', 'a1', 1], ['claude-opus', 'a2', undefined]])
+  expect(io.files.get(`${review.reportDir}/codex-default.md`)).toContain('### [P1] Off by one')
+  expect(reviews.statusOf(review.reviewers[1]!)).toBe('running')
+  expect(reviews.isDone(review)).toBe(false)
+  await late!()
+  expect(reviews.isDone(review)).toBe(true)
+  expect(io.files.get(`${review.reportDir}/claude-opus.md`)).toContain('### [P1] Off by one')
+})
+
+test('a reload while a review started binds its reviewers to the runs agents kept for them', async () => {
+  const { io, agents, providers, alert } = setup()
+  const first = makeReviews(CACHE)
+  const review = await first.begin(io, agents.port, providers, alert, input({ specs: [{ provider: 'codex' }] }))
+  // as the review was written before its reviewers' starts answered
+  const unbound = { ...review, reviewers: review.reviewers.map(({ agent: _a, ...e }) => e) }
+  io.files.set(`${CACHE}/reviews/${review.id}.json`, JSON.stringify(unbound))
+  const reloaded = makeReviews(CACHE)
+  await reloaded.restore(io, agents.port, 's1')
+  const restored = await reloaded.load(io, agents.port, review.id)
+  expect(restored.reviewers[0]!.agent).toBe('a1')
+  expect(reloaded.statusOf(restored.reviewers[0]!)).toBe('running')
+  expect(JSON.parse(io.files.get(`${CACHE}/reviews/${review.id}.json`)!).reviewers[0].agent).toBe('a1')
+})
+
+test("a review from another session is read with its reviewers' runs; an unparsed follow-up leaves no findings count", async () => {
+  const { io, agents, providers, alert } = setup()
+  const own = makeReviews(CACHE)
+  const review = await own.begin(io, agents.port, providers, alert, input({ specs: [{ provider: 'codex' }] }))
+  await own.ended(io, alert, agents.end('a1', { status: 'ok', text: JSON.stringify(FINDINGS), model: 'gpt-6.1-sol', continueId: 'th-1' }), { status: 'ok', text: JSON.stringify(FINDINGS), model: 'gpt-6.1-sol' })
+  const other = makeReviews(CACHE)
+  const read = await other.load(io, agents.port, review.id)
+  expect(other.summary(read)).toContain('- codex-default (gpt-6.1-sol): 1 findings')
+  await own.ask(io, agents.port, providers, alert, 's1', review.id, 'codex-default', 'And Y?')
+  await own.ended(io, alert, agents.end('a1', { status: 'ok', text: 'Y is fine.', model: 'gpt-6.1-sol' }), { status: 'ok', text: 'Y is fine.', model: 'gpt-6.1-sol' })
+  expect(own.summary(review)).toContain(`- codex-default (gpt-6.1-sol): unparsed findings → ${review.reportDir}/codex-default-followup-1.md`)
+})
+
 test('a change is read in the first read path the call names, though the paths resolve sorted', async () => {
   const io = fakeIo({
     run: argv => {

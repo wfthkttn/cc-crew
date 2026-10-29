@@ -150,13 +150,35 @@ export function makeReviews(cacheDir: string) {
     await io.write(`${review.reportDir}/run.json`, text)
   }
 
-  async function load(io: Io, id: string): Promise<Review> {
+  /** A review from memory, or from disk with its reviewers' runs, so one from another session shows as it ended. */
+  async function load(io: Io, agents: AgentsPort, id: string): Promise<Review> {
     const known = reviews.get(id)
     if (known !== undefined) return known
     if (!(await io.exists(pathOf(id)))) throw new Refused(`no review ${id}`)
     const review = JSON.parse(await io.read(pathOf(id))) as Review
+    for (const entry of review.reviewers) {
+      if (entry.agent !== undefined && !runs.has(entry.agent)) runs.set(entry.agent, await agents.get({ id: entry.agent }))
+    }
     reviews.set(id, review)
     return review
+  }
+
+  /** The runs and follow-ups whose `ended` call crew took, by run id and follow-up number. */
+  const endedSeen = new Set<string>()
+  const endOf = (run: AgentsRun) => `${run.id}#${run.followUps}`
+
+  /**
+   * Keeps a start or follow-up answer. Refused, it is reported now. Ended without being refused, its `ended` call came
+   * before this answer, or will come after it with the outcome, until which it counts as running.
+   */
+  async function answered(io: Io, alert: Alert, review: Review, entry: ReviewerEntry, run: AgentsRun): Promise<void> {
+    if (endedSeen.has(endOf(run))) return
+    if (run.status === 'running' || run.isRefused !== true) {
+      runs.set(run.id, { ...run, status: 'running' })
+      return
+    }
+    runs.set(run.id, run)
+    await report(io, alert, review, entry, run, refusedOutcome(run))
   }
 
   function statusOf(entry: ReviewerEntry): ReviewerStatus {
@@ -194,6 +216,7 @@ export function makeReviews(cacheDir: string) {
     await io.write(path, `${header(review, entry, o, message)}\n\n${body}\n`)
     entry.report = path
     if (findings !== undefined) entry.findings = findings.findings.length
+    else delete entry.findings
     if (o.status === 'signed_out' || o.status === 'quota') {
       const failed = await alert(entry.provider, o.detail ?? o.status)
       if (failed !== undefined) review.courier = failed
@@ -234,7 +257,21 @@ export function makeReviews(cacheDir: string) {
           if (review.session === session) reviews.set(id, review)
         }
       }
-      for (const run of await agents.list({ session })) runs.set(run.id, run)
+      const listed = await agents.list({ session })
+      for (const run of listed) runs.set(run.id, run)
+      // a reload while a review started can leave reviewers whose runs started but were never written into the review
+      for (const review of reviews.values()) {
+        if (review.session !== session) continue
+        let isBound = false
+        for (const entry of review.reviewers) {
+          if (entry.agent !== undefined || entry.error !== undefined) continue
+          const run = listed.find(r => r.group === review.id && r.label === entry.key)
+          if (run === undefined) continue
+          entry.agent = run.id
+          isBound = true
+        }
+        if (isBound) await save(io, review)
+      }
     },
 
     /** Starts every reviewer; one refused at once is reported at once. Refuses the whole review when a reviewer's work may not start. */
@@ -297,8 +334,7 @@ export function makeReviews(cacheDir: string) {
             return
           }
           entry.agent = run.id
-          runs.set(run.id, run)
-          if (run.status !== 'running') await report(io, alert, review, entry, run, refusedOutcome(run))
+          await answered(io, alert, review, entry, run)
         }),
       )
       await save(io, review)
@@ -320,7 +356,7 @@ export function makeReviews(cacheDir: string) {
 
     /** Asks a finished reviewer a follow-up; answers its agents run, running, or ended at once when refused. */
     async ask(io: Io, agents: AgentsPort, providers: ProvidersPort, alert: Alert, session: string, reviewId: string, key: string, message: string): Promise<{ review: Review; run: AgentsRun }> {
-      const review = await load(io, reviewId)
+      const review = await load(io, agents, reviewId)
       const entry = review.reviewers.find(x => x.key === key)
       if (entry === undefined) throw new Refused(`review ${review.id} has no reviewer ${key}; it has ${review.reviewers.map(x => x.key).join(', ')}`)
       if (entry.agent === undefined) throw new Refused(`${key} never started: ${entry.error ?? 'its start did not finish'}`)
@@ -336,11 +372,8 @@ export function makeReviews(cacheDir: string) {
         asked.delete(run.id)
         throw err
       }
-      runs.set(going.id, going)
-      if (going.status !== 'running') {
-        await report(io, alert, review, entry, going, refusedOutcome(going))
-        await save(io, review)
-      }
+      await answered(io, alert, review, entry, going)
+      if (going.isRefused === true) await save(io, review)
       return { review, run: going }
     },
 
@@ -356,8 +389,11 @@ export function makeReviews(cacheDir: string) {
     async ended(io: Io, alert: Alert, run: AgentsRun, outcome: AgentsOutcome): Promise<Review | undefined> {
       const review = run.group === undefined ? undefined : reviews.get(run.group)
       if (review === undefined) return undefined
-      const entry = review.reviewers.find(e => e.agent === run.id)
+      // an end can come before the start's answer bound the reviewer to its run
+      const entry = review.reviewers.find(e => e.agent === run.id) ?? review.reviewers.find(e => e.agent === undefined && e.key === run.label)
       if (entry === undefined) throw new Error(`crew: review ${review.id} has no reviewer on agents run ${run.id}, which ended`)
+      entry.agent = run.id
+      endedSeen.add(endOf(run))
       runs.set(run.id, run)
       await report(io, alert, review, entry, run, outcome)
       await save(io, review)

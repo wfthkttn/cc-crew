@@ -105,7 +105,7 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
         isCostEstimate: false,
         followUps: 0,
         startedAt: 0,
-        ...(refused === undefined ? { current: id } : { detail: refused, endedAt: 0 }),
+        ...(refused === undefined ? { current: id } : { detail: refused, isRefused: true, endedAt: 0 }),
       }
       runs.set(id, run)
       return run

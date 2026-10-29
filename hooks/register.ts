@@ -404,7 +404,7 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
   const all = liveReviews()
   const agents = agentsOf($)
   const { review, run } = await all.ask(ioOf($), agents, providersOf($), alertOf($), sessionId, str(f, 'run'), key, str(f, 'message'))
-  if (run.status !== 'running') throw new Refused(`${key}: ${run.detail ?? run.status}`)
+  if (run.isRefused === true) throw new Refused(`${key}: ${run.detail ?? run.status}`)
   if (f.background === false) {
     signal.addEventListener('abort', () => void agents.stop({ id: run.id }))
     await all.whenAnswered(run.id)
@@ -416,7 +416,7 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
 
 async function status($: EngineInterface, f: Fields): Promise<string> {
   const all = liveReviews()
-  if (typeof f.run === 'string') return all.summary(await all.load(ioOf($), f.run))
+  if (typeof f.run === 'string') return all.summary(await all.load(ioOf($), agentsOf($), f.run))
   const lines = all.sessionReviews(sessionId).map(r => all.summary(r).split('\n')[0]!)
   if (lines.length === 0) lines.push('No crew reviews in this session.')
   const ids = reviewable().map(p => p.id)
