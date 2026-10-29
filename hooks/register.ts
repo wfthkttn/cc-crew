@@ -1,57 +1,43 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 'cc-sidebar'
+import type { ProvidersGroup, ProvidersInfo, ProvidersLimitReached, ProvidersLimits } from 'cc-providers'
 
 import { ClaudeAgents } from './agents.ts'
+import type { ChangeSpec } from './changes.ts'
+import { type Choice, type Settings, settingsFrom, withDefaults } from './config.ts'
 import { wrap } from './detail.ts'
-import { type ChangeSpec, changeOf } from './changes.ts'
-import { homeEnv as agyHomeEnv } from './antigravity.ts'
-import { BUILT_IN, type Choice, type Provider, type Settings, isBuiltIn, settingsFrom, withDefaults } from './config.ts'
 import type { Io } from './io.ts'
-import { type Catalog, groupOf, loadCatalog, modelKey, readCodexCatalog, withCodex } from './catalog.ts'
-import { agentRefusal, followUpRefusal, type Gate, gatesOf, reviewRefusal, sum } from './limits.ts'
-import { type CustomReviewer, loadReviewers, reviewersPath } from './reviewers.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
-import type { DetailProps, Tab, Target } from './overview-props.ts'
+import type { DetailProps, Role, Tab, Target } from './overview-props.ts'
+import { isAbsolute, isInside, isWindowsPath, join, namesOf } from './paths.ts'
+import { REVIEWER_PROMPT, systemPrompt } from './prompt.ts'
+import { gaugeColumns, quotaProps, type QuotaView } from './quota.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
-import { describeEnd, run as runChild } from './proc.ts'
-import { REVIEWER_PROMPT, systemPrompt, taskText } from './prompt.ts'
-import {
-  type Alert,
-  type ReviewerSpec,
-  type Run,
-  ask,
-  continueOne,
-  execute,
-  keysFor,
-  load,
-  runs,
-  slugOf,
-  stopReviewer,
-  summary,
-} from './runs.ts'
-import { type ReadSpec, findSecrets, folderOf, isAbsolute, isInside, isWindowsPath, join, namesOf, resolveRoots } from './scope.ts'
-import { bashUnder } from './shell.ts'
+import { type Alert, type AgentsPort, makeReviews, type ProvidersPort, Refused, type Reviews, type ReviewerSpec } from './reviews.ts'
 import { fillSlot, hasSlot } from './slot.ts'
-import { claudeTokens } from './usage.ts'
-import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, limitsOf, limitsProps, overviewProps, runDetail, spentOf, usageDetail } from './views.ts'
+import { claudeTokens, sum, usd } from './usage.ts'
+import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, overviewProps, runDetail, usageDetail } from './views.ts'
 
-const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness: Codex (GPT models, ChatGPT plan), Antigravity (Gemini models, and Claude Opus/Sonnet 5.5 by model id, Google AI Pro plan) and a Claude reviewer (Claude Code run headless). Use it for a second opinion on code, a change, a design or a document.
+const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness, run headless through cc-providers. Use it for a second opinion on code, a change, a design or a document.
 
 Each reviewer reads only what \`read\` allows (the project by default), secret files (.env and the like) are always blocked, the rest of the disk is closed, and nothing is written except the reports. It runs in the background by default: you get the run id at once and a message with every reviewer's result when all are done. Do not poll or wait for it.
 
 Brief it like a colleague who just walked into the room: the reviewers know nothing of this conversation. Say what to review, what matters, what you already know or suspect is out of scope. With \`changes\`, the diff is put in front of every reviewer.
 
-Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out or out of quota is reported loudly and the others carry on.
+Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out, out of quota or past its limit is reported loudly and the others carry on. A reviewer's cache stays warm for an hour after it answers, so a follow-up within it is cheap; the summary says until when.`
 
-Models: a reviewer whose call names no model or effort runs the configured default for its provider. codex takes its own model names and effort low|medium|high|xhigh|max|ultra. antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort. claude takes sonnet|opus|haiku and effort low|medium|high|xhigh|max, and runs on Claude whatever backend this session uses.`
-
-function reviewDescription(custom: readonly CustomReviewer[]): string {
-  if (custom.length === 0) return REVIEW_DESCRIPTION
-  const names = custom.map(r => `${r.name} (${r.command[0]}${r.model !== undefined ? `, ${r.model} by default` : ''})`).join(', ')
-  return `${REVIEW_DESCRIPTION}\n\nAlso configured here: ${names}. Each is Claude Code run headless through its own command, on whatever models that command serves; a call's model and effort reach it as --model and --effort.`
+const MODEL_NOTES: Record<string, string> = {
+  codex: 'codex takes its own model names and effort low|medium|high|xhigh|max|ultra',
+  antigravity: 'antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort',
+  claude: 'claude takes sonnet|opus|haiku and effort low|medium|high|xhigh|max, and runs on Claude whatever backend this session uses',
 }
 
-function reviewSchema(providers: readonly Provider[]) {
+function reviewDescription(reviewable: readonly ProvidersInfo[]): string {
+  const names = reviewable.map(p => (MODEL_NOTES[p.id] !== undefined ? `${MODEL_NOTES[p.id]}` : `${p.id} (${p.name}) runs its own models, a call's model and effort passed on`))
+  return `${REVIEW_DESCRIPTION}\n\nReviewers: ${reviewable.map(p => p.id).join(', ')}. A reviewer whose call names no model or effort runs the configured default for its provider. ${names.join('. ')}.`
+}
+
+function reviewSchema(providers: readonly string[]) {
   const item = {
     type: 'object',
     properties: {
@@ -79,7 +65,7 @@ const REVIEW_SCHEMA = {
       description:
         'Allow web search and page reads (default false). Content under review can then steer a reviewer into fetching a URL that carries what it read: secrets stay closed, the reviewed code does not.',
     },
-    helpers: { type: 'boolean', description: "Let Codex and Antigravity reviewers run their own helper agents (default false)" },
+    helpers: { type: 'boolean', description: 'Let Codex and Antigravity reviewers run their own helper agents (default false)' },
     changes: {
       description: 'Review a change: "uncommitted", { "base": "<branch>" } or { "commit": "<sha>" } in the first read path',
       anyOf: [
@@ -114,12 +100,8 @@ const STATUS_SCHEMA = {
 }
 
 let settings: Settings
-/** The person's reviewers.json; set at session start. */
-let custom: CustomReviewer[] = []
 let system = REVIEWER_PROMPT
 let cacheDir = ''
-/** Set at session start. */
-let isWindows = false
 
 const TAB_ID = 'crew'
 const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
@@ -138,49 +120,53 @@ const ROW_COMPONENTS = [
   'TurnDuration',
   'InfoNotice',
 ] as const satisfies readonly SidebarRowComponent[]
-/** After the vault's and quota's tabs. */
+/** After the vault's tab. */
 const TOOL = { id: TAB_ID, icon: '👥', short: 'crew', drawerColumns: OVERVIEW_COLUMNS + DRAWER_FRAME_COLUMNS, order: 2 }
-/** How often the open drawer redraws, for its clocks. */
+/** How often the open drawer redraws, for its clocks, and the limits are read again. */
 const TICK_MS = 1000
+/** How often the quota, the providers and their pools are read again: providers reads a provider's quota every 5 minutes. */
+const QUOTA_MS = 30_000
 
 let sessionId = ''
+/** Made at the first session start of this load: reviews running across a `/clear` still end into it. */
+let reviews: Reviews | null = null
 const claudeAgents = new ClaudeAgents()
-/** What the modal shows: a run or agent with its brief or prompt as read when it was opened, or a group or model worked out on each draw; the page it is at. */
+/** What the modal shows: a review or agent with its brief or prompt as read when it was opened, or a pool or model worked out on each draw; the page it is at. */
 let detail: { target: Target; text: string; page: number } | null = null
 let ticker: { cancel(): void } | null = null
+let quotaTicker: { cancel(): void } | null = null
 let record: SessionRecord = emptyRecord()
 let view: { tab: Tab; page: number } = { tab: 'running', page: 0 }
+/** Set at session start and read again with the quota. */
+let providersInfo: ProvidersInfo[] = []
+let groups: ProvidersGroup[] = []
+let quotaViews: QuotaView[] = []
+/** Why the last quota read failed, shown on the Quota tab. */
+let quotaError: string | null = null
+/** The provider the session runs on; its subagents' models are keyed under it. */
+let sessionProvider = ''
+/** Set at session start and read again every tick. */
+let limits: ProvidersLimits | null = null
+/** The Telegram ask about a paused pool, open until answered or the pause ends. */
+let openAsk: { key: string; pool: string } | null = null
 
-const sessionRuns = () => [...runs.values()].filter(run => run.sessionId === sessionId)
-/** crew's models.json with the person's over it and what Codex says of itself; set at session start. */
-let catalog: Catalog | null = null
-/** Why the catalog stands on models.json alone where it would ask a tool, shown under Usage. */
-let catalogNote: string | null = null
-function liveCatalog(): Catalog {
-  if (catalog === null) throw new Error('crew: the model catalog is used before session start')
-  return catalog
+function liveReviews(): Reviews {
+  if (reviews === null) throw new Error('crew: reviews are used before session start')
+  return reviews
 }
-const currentLimits = () => limitsOf(liveCatalog(), settings.fallbackUsd, record)
-const currentSpent = () => spentOf(itemsOf(liveCatalog(), sessionRuns(), claudeAgents.all()))
-/** The quota group a model counts in. */
-const groupFor = (provider: Provider, model: string | undefined) => groupOf(liveCatalog(), modelKey(liveCatalog(), provider, model)).group
+
+function liveLimits(): ProvidersLimits {
+  if (limits === null) throw new Error('crew: limits are used before session start')
+  return limits
+}
+
+const sessionViews = () => liveReviews().sessionReviews(sessionId).map(r => liveReviews().viewOf(r))
+const reviewable = () => providersInfo.filter(p => p.styles.some(s => s.startsWith('cli:')))
+const gates = () => [...providersInfo.map(p => p.id), 'agents']
 
 async function keep($: EngineInterface): Promise<void> {
   record.agents = claudeAgents.all()
   await saveRecord(ioOf($), recordPath(cacheDir, sessionId), record)
-}
-
-/** This session's runs from disk, so a reload or a resume still shows and counts them. */
-async function loadSessionRuns($: EngineInterface): Promise<void> {
-  const io = ioOf($)
-  const dir = `${cacheDir}/runs`
-  if (!(await io.exists(dir))) return
-  for (const entry of await io.list(dir)) {
-    const path = `${dir}/${entry.name}/run.json`
-    if (entry.kind !== 'dir' || runs.has(entry.name) || !(await io.exists(path))) continue
-    const kept = JSON.parse(await io.read(path)) as Pick<Run, 'sessionId'>
-    if (kept.sessionId === sessionId) await load(io, cacheDir, entry.name)
-  }
 }
 
 const promptPath = (agentId: string) => `${cacheDir}/sessions/${sessionId}/prompts/${agentId}.md`
@@ -196,17 +182,17 @@ export function detailProps(title: string, text: string, room: { rows: number; c
   return { title, lines: shown, columns: room.columns, page: at, pages, first: at * size + 1, last: at * size + shown.length, total: lines.length }
 }
 
-/** The pop-out's title and text for what it shows, from the run's, agent's or model's state now; null once it is gone. */
+/** The pop-out's title and text for what it shows, from the review's, agent's or model's state now; null once it is gone. */
 function shownDetail(shown: NonNullable<typeof detail>, now: number): { title: string; text: string } | null {
   const target = shown.target
   if ('group' in target || 'model' in target) {
-    const items = itemsOf(liveCatalog(), sessionRuns(), claudeAgents.all())
-    const title = 'model' in target ? target.model : (liveCatalog().groups.find(g => g.id === target.group)?.name ?? target.group)
-    return { title, text: usageDetail(liveCatalog(), items, currentLimits(), target, now) }
+    const items = itemsOf(groups, sessionViews(), claudeAgents.all())
+    const title = 'model' in target ? target.model : (groups.find(g => g.id === target.group)?.name ?? target.group)
+    return { title, text: usageDetail(groups, items, liveLimits(), target, now) }
   }
   if ('run' in target) {
-    const run = runs.get(target.run)
-    return run === undefined ? null : { title: `review: ${run.description}`, text: runDetail(run, shown.text) }
+    const review = liveReviews().sessionReviews(sessionId).find(r => r.id === target.run)
+    return review === undefined ? null : { title: `review: ${review.description}`, text: runDetail(liveReviews().viewOf(review), shown.text) }
   }
   const id = target.agent
   const agent = claudeAgents.all().find(a => a.id === id)
@@ -227,9 +213,9 @@ async function open($: EngineInterface, target: Target): Promise<void> {
   }
   let path: string
   if ('run' in target) {
-    const run = runs.get(target.run)
-    if (run === undefined) throw new Error(`crew: no run ${target.run} in this session to open`)
-    path = `${run.reportDir}/brief.md`
+    const review = liveReviews().sessionReviews(sessionId).find(r => r.id === target.run)
+    if (review === undefined) throw new Error(`crew: no review ${target.run} in this session to open`)
+    path = `${review.reportDir}/brief.md`
   } else {
     path = promptPath(target.agent)
   }
@@ -245,7 +231,7 @@ async function open($: EngineInterface, target: Target): Promise<void> {
 let badge: Badge | null = null
 
 async function syncBadge($: EngineInterface): Promise<void> {
-  const next = badgeOf(sessionRuns(), claudeAgents.all(), limitsProps(liveCatalog(), currentLimits(), currentSpent(), gatesOf(custom)))
+  const next = badgeOf(sessionViews(), claudeAgents.all(), liveLimits())
   if (badge !== null && next.count === badge.count && next.level === badge.level) return
   badge = next
   await $.sidebar.badge({ id: TAB_ID, ...next })
@@ -253,18 +239,30 @@ async function syncBadge($: EngineInterface): Promise<void> {
 
 async function tick($: EngineInterface): Promise<void> {
   claudeAgents.refresh(await $.agent.list())
+  limits = await $.providers.limits({ session: sessionId })
+  if (openAsk !== null && !limits.pools.some(p => p.pool === openAsk?.pool && p.pausedAt !== null)) {
+    const ask = openAsk
+    openAsk = null
+    await $.courier.cancel({ key: ask.key, reason: 'The pause ended: its limit was raised or the limits were switched off.' })
+  }
   await syncBadge($)
   if ((await $.sidebar.selected({})) !== TAB_ID) return
   $.ui.invalidate('ui.render')
 }
 
-const alert: Alert = async (io, provider, detail) => {
+/** Reads the providers, their pools and their quota again, and draws the gauge. */
+async function readQuota($: EngineInterface): Promise<void> {
   try {
-    await io.notify(`${provider}: ${detail}`)
-    return undefined
+    providersInfo = await $.providers.list()
+    groups = (await $.providers.catalog()).groups
+    quotaViews = await Promise.all(providersInfo.map(async info => ({ info, slots: await $.providers.quota({ provider: info.id, session: sessionId }) })))
+    quotaError = null
   } catch (err) {
-    return String(err)
+    quotaError = `quota not read: ${err instanceof Error ? err.message : String(err)}`
   }
+  const columns = gaugeColumns(quotaViews, await $.clock.now())
+  await $.sidebar.gauge({ id: TAB_ID, columns: columns.length === 0 ? null : columns })
+  $.ui.invalidate('ui.render')
 }
 
 type Fields = Record<string, unknown>
@@ -277,15 +275,11 @@ function str(f: Fields, key: string): string {
   return v
 }
 
-const providers = (): Provider[] => [...BUILT_IN, ...custom.map(r => r.name)]
-
-/** A reviewer named in a call or in the default list, its defaults filled in; a reviewers.json one carries its command. */
+/** A reviewer named in a call or in the default list, its provider's defaults filled in. */
 function specOf(provider: string, own: Choice, where: string): ReviewerSpec {
-  if (isBuiltIn(provider)) return withDefaults({ provider, ...own }, settings.defaults)
-  const entry = custom.find(r => r.name === provider)
-  if (entry === undefined) throw new BadInput(`unknown provider ${provider} ${where} (known: ${providers().join(', ')}; others go in ${reviewersPath('~')})`)
-  const defaults: Choice = { ...(entry.model !== undefined ? { model: entry.model } : {}), ...(entry.effort !== undefined ? { effort: entry.effort } : {}) }
-  return withDefaults({ provider, ...own, command: entry.command }, { [provider]: defaults })
+  const known = reviewable().map(p => p.id)
+  if (!known.includes(provider)) throw new BadInput(`unknown reviewer ${provider} ${where} (known: ${known.join(', ')}; others are providers in ~/.config/providers/providers.json with a cli: endpoint)`)
+  return withDefaults({ provider, ...own }, settings.defaults)
 }
 
 function reviewersOf(f: Fields): ReviewerSpec[] {
@@ -300,7 +294,7 @@ function reviewersOf(f: Fields): ReviewerSpec[] {
   })
 }
 
-function readOf(f: Fields): ReadSpec {
+function readOf(f: Fields): 'project' | 'none' | string[] {
   const v = f.read ?? 'project'
   if (v === 'project' || v === 'none') return v
   if (Array.isArray(v) && v.length > 0 && v.every(p => typeof p === 'string')) return v as string[]
@@ -330,169 +324,106 @@ function reportBase(f: Fields, project: string): string {
   return path
 }
 
-/** Characters per `$.fs.write`: at most 4 bytes each in UTF-8, so a piece stays under the engine's 4 MiB a write. */
-const WRITE_PIECE = 1024 * 1024
-
-/**
- * Writes a file of any size: one past a piece goes in pieces, which a shell joins. Antigravity's deny list for a read
- * path in a folder as full as /nix/store runs past 4 MiB.
- */
-async function writeFile($: EngineInterface, path: string, text: string): Promise<void> {
-  if (text.length <= WRITE_PIECE) return $.fs.write(path, text)
-  const pieces: string[] = []
-  for (let at = 0; at < text.length; at += WRITE_PIECE) {
-    const piece = `${path}.piece-${pieces.length}`
-    await $.fs.write(piece, text.slice(at, at + WRITE_PIECE))
-    pieces.push(piece)
-  }
-  const joined = await $.process.run([(await gitBashOf($)) ?? 'sh', '-c', 'out="$1"; shift; cat -- "$@" > "$out" && rm -- "$@"', 'sh', path, ...pieces])
-  if (joined.exitCode !== 0) throw new Error(`crew: could not join ${pieces.length} pieces into ${path} (exit ${joined.exitCode}): ${joined.stderr.trim()}`)
-}
-
-let gitBash: string | null = null
-
-/**
- * Git Bash on Windows, for crew's own shell scripts: there `sh` and `bash` are on PATH only in a session started from
- * Git Bash, and Claude Code needs Git for Windows anyway. Null elsewhere, where the shell on PATH runs them.
- */
-async function gitBashOf($: EngineInterface): Promise<string | null> {
-  if (!isWindows) return null
-  if (gitBash !== null) return gitBash
-  const given = await $.env.get('CLAUDE_CODE_GIT_BASH_PATH')
-  if (given !== undefined && given !== '') return (gitBash = given)
-  const git = await $.process.run(['git', '--exec-path'], { timeoutMs: 10_000 })
-  if (git.exitCode !== 0) throw new Error(`crew: no Git Bash: git --exec-path failed (exit ${git.exitCode}): ${git.stderr.trim()}`)
-  const found = bashUnder(git.stdout.trim())
-  if (!(await $.fs.exists(found))) throw new Error(`crew: no Git Bash at ${found}, where git's exec path puts it`)
-  return (gitBash = found)
-}
-
 function ioOf($: EngineInterface): Io {
   return {
-    stat: (path, options) => $.fs.stat(path, options),
     list: path => $.fs.list(path),
     read: path => $.fs.read(path),
-    write: (path, text) => writeFile($, path, text),
+    write: (path, text) => $.fs.write(path, text),
     exists: path => $.fs.exists(path),
-    spawn: request => $.process.spawn(request),
     run: (argv, init) => $.process.run(argv, init),
     now: () => $.clock.now(),
-    after: (ms, fn) => $.clock.after(ms, fn),
-    sleep: ms => $.clock.sleep(ms),
-    notify: text => $.conversation.tell({ text: `crew: ${text}`, group: 'attention' }),
   }
 }
 
-async function runId($: EngineInterface): Promise<string> {
-  const d = new Date(await $.clock.now())
-  const p = (n: number) => String(n).padStart(2, '0')
-  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-  const tail = Math.floor(Math.random() * 36 ** 3).toString(36).padStart(3, '0')
-  return `${stamp}-${tail}`
+function agentsOf($: EngineInterface): AgentsPort {
+  return {
+    start: input => $.agents.start(input),
+    followUp: input => $.agents.followUp(input),
+    stop: input => $.agents.stop(input),
+    get: input => $.agents.get(input),
+    list: input => $.agents.list(input),
+  }
 }
 
-async function finish($: EngineInterface, label: string, work: () => Promise<string>): Promise<void> {
-  let text: string
-  try {
-    text = await work()
-  } catch (err) {
-    text = `${label} failed: ${String(err)}`
+function providersOf($: EngineInterface): ProvidersPort {
+  return {
+    modelKey: input => $.providers.modelKey(input),
+    refusal: input => $.providers.refusal(input),
+    roots: input => $.providers.roots(input),
+    secretPaths: input => $.providers.secretPaths(input),
   }
-  await $.conversation.deliver({ from: 'crew', text })
+}
+
+function alertOf($: EngineInterface): Alert {
+  return async (provider, detail) => {
+    try {
+      await $.conversation.tell({ text: `crew: ${provider}: ${detail}`, group: 'attention' })
+      return undefined
+    } catch (err) {
+      return String(err)
+    }
+  }
 }
 
 async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
   const description = str(f, 'description')
   const brief = str(f, 'prompt')
   const specs = reviewersOf(f)
-  const groups = specs.map(s => groupFor(s.provider, s.model))
-  const refusal = reviewRefusal(currentLimits(), currentSpent(), specs.map(s => s.provider), groups)
-  if (refusal !== undefined) throw new BadInput(refusal)
   const read = readOf(f)
   const changes = changesOf(f)
-  const web = f.web === true
-  const helpers = f.helpers === true
-  const background = f.background !== false
-  const io = ioOf($)
   const project = await $.session.root()
-  const base = reportBase(f, project)
-  const { roots, files } = await resolveRoots(io, read, project)
-  if (changes !== undefined && roots[0] === undefined) throw new BadInput('changes needs a read path holding the repository')
-  const secrets = await findSecrets(io, roots, files)
-  const change = changes !== undefined && roots[0] !== undefined ? await changeOf(io, folderOf(roots[0], files), changes) : undefined
-  const id = await runId($)
-  const runDir = `${cacheDir}/runs/${id}`
-  const keys = keysFor(specs)
-  const now = await $.clock.now()
-  const run: Run = {
-    id,
+  const all = liveReviews()
+  const agents = agentsOf($)
+  const review = await all.begin(ioOf($), agents, providersOf($), alertOf($), {
+    session: sessionId,
     description,
-    createdAt: now,
-    reportDir: `${base}/${id}-${slugOf(description)}`,
-    runDir,
-    roots,
-    files,
-    secrets,
-    web,
-    helpers,
-    ...(change !== undefined ? { changes: change.label } : {}),
-    reviewers: specs.map((s, i) => ({ ...s, key: keys[i]!, status: 'running', dir: `${runDir}/${keys[i]!}`, startedAt: now })),
-    sessionId,
+    brief,
+    specs,
+    read,
+    project,
+    reportBase: reportBase(f, project),
+    ...(changes === undefined ? {} : { changes }),
+    web: f.web === true,
+    helpers: f.helpers === true,
+    system,
+    timeoutMs: settings.timeoutMs,
+  })
+  if (f.background === false) {
+    signal.addEventListener('abort', () => void all.stop(agents, review.id))
+    await all.whenDone(review.id)
+    return all.summary(review)
   }
-  const task = taskText({ brief, roots, web, ...(change !== undefined ? { changes: change } : {}) })
-  await $.fs.write(`${run.reportDir}/brief.md`, task)
-  if (!background) {
-    await execute(io, run, settings, system, task, cacheDir, alert, signal)
-    return summary(run)
-  }
-  $.clock.after(0, () =>
-    void finish($, `review ${id}`, async () => {
-      await execute(io, run, settings, system, task, cacheDir, alert)
-      return `review finished.\n${summary(run)}`
-    }),
-  )
-  const who = run.reviewers.map(r => r.key).join(', ')
-  return `Started crew review ${id} (${who}). The results arrive as a message when every reviewer is done; reports go to ${run.reportDir}.`
+  if (all.isDone(review)) return all.summary(review)
+  void all.whenDone(review.id).then(() => $.conversation.deliver({ from: 'crew', text: `review finished.\n${all.summary(review)}` }))
+  const who = review.reviewers.map(r => r.key).join(', ')
+  return `Started crew review ${review.id} (${who}). The results arrive as a message when every reviewer is done; reports go to ${review.reportDir}.`
 }
 
 async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
-  const io = ioOf($)
-  const run = await load(io, cacheDir, str(f, 'run'))
   const key = str(f, 'reviewer')
-  const message = str(f, 'message')
-  const r = run.reviewers.find(x => x.key === key)
-  if (r === undefined) throw new BadInput(`run ${run.id} has no reviewer ${key}; it has ${run.reviewers.map(x => x.key).join(', ')}`)
-  if (r.status === 'running') throw new BadInput(`${key} is still running`)
-  const refusal = followUpRefusal(currentLimits(), currentSpent(), r.provider, groupFor(r.provider, r.usedModel ?? r.model))
-  if (refusal !== undefined) throw new BadInput(refusal)
+  const all = liveReviews()
+  const agents = agentsOf($)
+  const { review, run } = await all.ask(ioOf($), agents, providersOf($), alertOf($), sessionId, str(f, 'run'), key, str(f, 'message'))
+  if (run.status !== 'running') throw new Refused(`${key}: ${run.detail ?? run.status}`)
   if (f.background === false) {
-    await continueOne(io, run, r, settings, await ask(io, run, r, settings, system, message, signal), alert)
-    return summary(run)
+    signal.addEventListener('abort', () => void agents.stop({ id: run.id }))
+    await all.whenAnswered(run.id)
+    return all.summary(review)
   }
-  const asked = await ask(io, run, r, settings, system, message)
-  $.clock.after(0, () =>
-    void finish($, `follow-up ${run.id}/${key}`, async () => {
-      await continueOne(io, run, r, settings, asked, alert)
-      return `follow-up to ${key} finished.\n${summary(run)}`
-    }),
-  )
-  return `Asked ${key} in run ${run.id}. Its answer arrives as a message.`
+  void all.whenAnswered(run.id).then(() => $.conversation.deliver({ from: 'crew', text: `follow-up to ${key} finished.\n${all.summary(review)}` }))
+  return `Asked ${key} in run ${review.id}. Its answer arrives as a message.`
 }
 
 async function status($: EngineInterface, f: Fields): Promise<string> {
-  const io = ioOf($)
-  if (typeof f.run === 'string') return summary(await load(io, cacheDir, f.run))
-  const lines = [...runs.values()].map(r => summary(r).split('\n')[0]!)
+  const all = liveReviews()
+  if (typeof f.run === 'string') return all.summary(await all.load(ioOf($), f.run))
+  const lines = all.sessionReviews(sessionId).map(r => all.summary(r).split('\n')[0]!)
   if (lines.length === 0) lines.push('No crew reviews in this session.')
-  let agyQuota: string
-  try {
-    const quota = await runChild(io, { argv: [settings.agyBin, '-p', '/quota'], env: agyHomeEnv(join(cacheDir, 'agy-home')) }, { timeoutMs: 20_000 })
-    agyQuota = quota.ended.kind === 'exited' && quota.ended.code === 0 ? quota.stdout.trim() : `unavailable (${describeEnd(quota)})`
-  } catch (err) {
-    agyQuota = `unavailable: ${settings.agyBin} did not run (${String(err)})`
+  const ids = reviewable().map(p => p.id)
+  const views = await Promise.all(providersInfo.filter(p => ids.includes(p.id)).map(async info => ({ info, slots: await $.providers.quota({ provider: info.id, session: sessionId }) })))
+  for (const block of quotaProps(views, await $.clock.now()).blocks) {
+    lines.push('', `${block.title} quota:`, ...block.rows.map(r => `- ${r.pool === '' ? '' : `${r.pool} `}${r.window}: ${r.left} left, resets ${r.resets}`), ...block.notes.map(n => `- ${n}`))
   }
-  lines.push('', 'Antigravity quota:', agyQuota)
-  lines.push('Codex quota: not read yet (needs its app-server).')
   return lines.join('\n')
 }
 
@@ -503,23 +434,80 @@ function fields(e: unknown): Fields {
 function answer(work: Promise<string>) {
   return work.then(
     text => ({ result: text }),
-    (err: unknown) => ({ deny: err instanceof BadInput ? `crew: ${err.message}` : `crew: ${String(err)}` }),
+    (err: unknown) => ({ deny: err instanceof BadInput || err instanceof Refused ? `crew: ${err.message}` : `crew: ${String(err)}` }),
   )
+}
+
+/** What a Telegram ask came to: the label pressed, or why none was. */
+type Asked = { picked: string } | { picked: undefined; why: 'not enabled' | 'closed' | 'courier not loaded' }
+
+const isCourierMissing = (err: unknown) => err instanceof TypeError && err.message.includes('$.courier')
+
+/** Shows `text` with one button per label in the session's thread and waits for a press. A failure other than a missing courier rejects. */
+async function askChoice($: EngineInterface, key: string, pool: string, text: string, labels: string[]): Promise<Asked> {
+  try {
+    if (openAsk !== null) await $.courier.cancel({ key: openAsk.key, reason: 'Replaced by a newer ask.' })
+    openAsk = null
+    await $.courier.ask({ key, thread: `cc:${sessionId}`, questions: [{ id: 'action', text, options: labels.map(label => ({ label })) }] })
+    let shown = await $.courier.deliver({ key, group: 'attention' })
+    if (shown.state === 'held') {
+      await $.courier.cancel({ key, reason: 'The thread is not enabled.' })
+      return { picked: undefined, why: 'not enabled' }
+    }
+    openAsk = { key, pool }
+    while (shown.state === 'delivered' && openAsk?.key === key) shown = await $.courier.wait({ key, known: 'delivered' })
+    if (shown.state !== 'answered' || openAsk?.key !== key) return { picked: undefined, why: 'closed' }
+    openAsk = null
+    const picked = shown.answers['action']?.selected[0]
+    if (picked === undefined || !labels.includes(picked)) throw new Error(`the answer ${JSON.stringify(picked)} is none of ${labels.join(', ')}`)
+    return { picked }
+  } catch (err) {
+    if (isCourierMissing(err)) return { picked: undefined, why: 'courier not loaded' }
+    throw err
+  }
+}
+
+const KEEP_PAUSED = 'Keep paused'
+
+/**
+ * Asks the person on Telegram whether to let the paused conversation go on, and raises its limit by what they press;
+ * asks again while a raise leaves it paused. Without Telegram the terminal and the thread get a notice instead.
+ */
+async function askRaise($: EngineInterface, reached: Pick<ProvidersLimitReached, 'pool' | 'name' | 'spentUsd' | 'limitUsd' | 'at'>): Promise<void> {
+  const text = `Paused: this conversation spent ${usd(reached.spentUsd)} in the ${reached.name} pool at API prices, past its limit of ${usd(reached.limitUsd)}. It goes on in turns you start; a raise lets it go on by itself.`
+  const labels = [...RAISES_USD.map(n => `+$${n}`), KEEP_PAUSED]
+  const asked = await askChoice($, `crew-limit:${sessionId}:${reached.pool}:${reached.at}`, reached.pool, text, labels)
+  if (asked.picked === undefined) {
+    if (asked.why === 'closed') return
+    await $.conversation.tell({ text: `crew: ${text}`, group: 'attention' })
+    await $.ui.toast(`crew: ${text}`)
+    return
+  }
+  if (asked.picked === KEEP_PAUSED) return
+  const raised = await $.providers.raise({ session: sessionId, pool: reached.pool, role: 'main', usd: Number(asked.picked.slice(2)) })
+  limits = raised
+  await syncBadge($)
+  const pool = raised.pools.find(p => p.pool === reached.pool)
+  if (pool?.pausedAt === null || pool === undefined || pool.main.limitUsd === null) return
+  await askRaise($, { pool: reached.pool, name: pool.name, spentUsd: pool.main.spentUsd, limitUsd: pool.main.limitUsd, at: await $.clock.now() })
 }
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
+    // cc-providers and cc-agents, which crew lists as dependencies, start inside next(e)
     const started = await next(e)
     const home = await $.env.get('HOME')
     if (home === undefined) throw new Error('crew: HOME is not set, so its cache folder is unknown')
-    isWindows = (await $.env.get('OS')) === 'Windows_NT'
     cacheDir = join(join(home, '.cache'), 'crew')
-    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
-    settings = settingsFrom(options, configDir !== undefined && configDir !== '' ? configDir : join(home, '.claude'))
+    settings = settingsFrom(options)
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
-    custom = await loadReviewers(ioOf($), home)
-    await $.tool.register({ name: 'review', description: reviewDescription(custom), inputSchema: reviewSchema(providers()), isDeferred: false })
+    reviews ??= makeReviews(cacheDir)
+    sessionId = await $.session.id()
+    providersInfo = await $.providers.list()
+    groups = (await $.providers.catalog()).groups
+    sessionProvider = (await $.providers.sessionProvider()).provider
+    await $.tool.register({ name: 'review', description: reviewDescription(reviewable()), inputSchema: reviewSchema(reviewable().map(p => p.id)), isDeferred: false })
     await $.tool.register({
       name: 'review_continue',
       description: 'Ask a reviewer of a finished crew review a follow-up, in its own conversation. Background by default: the answer arrives as a message.',
@@ -527,46 +515,33 @@ export const register: Register = (on, options) => {
     })
     await $.tool.register({
       name: 'review_status',
-      description: "This session's crew review runs and the Antigravity quota.",
+      description: "This session's crew reviews and the quota of each reviewer's provider.",
       inputSchema: STATUS_SCHEMA,
     })
-    const files = await loadCatalog(ioOf($), $.plugin.root, home)
-    catalog = files
-    catalogNote = null
-    $.clock.after(0, () =>
-      void gitBashOf($).then(bash => readCodexCatalog(ioOf($), settings.codexBin, bash ?? 'bash')).then(
-        codex => {
-          catalog = withCodex(files, codex)
-          $.ui.invalidate('ui.render')
-        },
-        (err: unknown) => {
-          catalogNote = `Codex's models not read (${String(err)}); models.json stands for them.`
-          $.ui.invalidate('ui.render')
-        },
-      ),
-    )
-    sessionId = await $.session.id()
     record = await loadRecord(ioOf($), recordPath(cacheDir, sessionId))
     claudeAgents.restore(record.agents, await $.agent.list())
-    await loadSessionRuns($)
+    await reviews.restore(ioOf($), agentsOf($), sessionId)
+    limits = await $.providers.limits({ session: sessionId })
     await $.sidebar.register(TOOL)
     await syncBadge($)
     ticker?.cancel()
     ticker = $.clock.every(TICK_MS, () => void tick($))
+    quotaTicker?.cancel()
+    quotaTicker = $.clock.every(QUOTA_MS, () => void readQuota($))
+    $.clock.after(0, () => void readQuota($))
     return started
   })
 
   on('agent.spawn', async ($, e, next) => {
-    // An agent type with a model of its own is gated on the asked or the parent's: the plugin API does not tell its type's model.
-    const refusal = agentRefusal(currentLimits(), currentSpent(), groupFor('claude', e.model ?? e.parentModel))
-    if (refusal !== undefined) return { deny: `crew: ${refusal}` }
     const spawned = await next(e)
     if (spawned.deny === undefined && spawned.agentId !== undefined) {
+      const model = spawned.model ?? e.model ?? e.parentModel
       claudeAgents.started({
         id: spawned.agentId,
         type: e.subagentType,
         description: e.description,
         model: spawned.model,
+        key: await $.providers.modelKey({ provider: sessionProvider, ...(model === undefined ? {} : { model }) }),
         ...(e.workflow === undefined ? {} : { workflow: e.workflow.runId }),
         startedAt: await $.clock.now(),
       })
@@ -576,43 +551,60 @@ export const register: Register = (on, options) => {
     return spawned
   })
 
+  on('agents.ended', async ($, e, next) => {
+    const ended = await next(e)
+    if (reviews !== null && (await reviews.ended(ioOf($), alertOf($), e.run, e.outcome)) !== undefined) {
+      await syncBadge($)
+      $.ui.invalidate('ui.render')
+    }
+    return ended
+  })
+
+  on('providers.limitReached', async ($, e, next) => {
+    const reached = await next(e)
+    if (e.session === sessionId) {
+      limits = await $.providers.limits({ session: sessionId })
+      await syncBadge($)
+      // a noun call is cut at 10 s; the ask waits on the person
+      $.clock.after(0, () =>
+        void askRaise($, e).catch(async (err: unknown) => {
+          const why = `crew: asking about the pause in ${e.name} failed: ${err instanceof Error ? err.message : String(err)}`
+          $.ui.log(why, { to: 'debug' })
+          await $.ui.toast(why)
+        }),
+      )
+    }
+    return reached
+  })
+
   on('ui.message', { element: OVERVIEW_KEY }, async ($, e, next) => {
     const data = e.data as {
       tab?: unknown
       page?: unknown
-      raise?: unknown
+      raise?: { pool?: unknown; role?: unknown; usd?: unknown }
       toggle?: unknown
       switchLimits?: unknown
       stop?: { run?: unknown; key?: unknown }
       open?: { run?: unknown; agent?: unknown; group?: unknown; model?: unknown }
     }
-    if (data.switchLimits === true) {
-      record.isLimitsOff = !record.isLimitsOff
-      await keep($)
-    }
-    if (data.tab === 'running' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits') view = { tab: data.tab, page: 0 }
+    if (data.switchLimits === true) limits = await $.providers.switchLimits({ session: sessionId, isOff: liveLimits().isOn })
+    if (data.tab === 'running' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits' || data.tab === 'quota') view = { tab: data.tab, page: 0 }
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
-    const raise = data.raise as { group?: unknown; usd?: unknown } | undefined
-    if (typeof raise?.group === 'string' && (RAISES_USD as readonly unknown[]).includes(raise.usd)) {
-      const group = raise.group
-      record.raises = { groups: { ...record.raises.groups, [group]: (record.raises.groups[group] ?? 0) + (raise.usd as number) } }
-      await keep($)
+    const raise = data.raise
+    if (typeof raise?.pool === 'string' && (raise.role === 'main' || raise.role === 'helpers') && (RAISES_USD as readonly unknown[]).includes(raise.usd)) {
+      limits = await $.providers.raise({ session: sessionId, pool: raise.pool, role: raise.role as Role, usd: raise.usd as number })
     }
-    if (typeof data.toggle === 'string' && gatesOf(custom).includes(data.toggle)) {
-      const gate: Gate = data.toggle
-      record.closed = record.closed.includes(gate) ? record.closed.filter(g => g !== gate) : [...record.closed, gate]
-      await keep($)
+    if (typeof data.toggle === 'string' && gates().includes(data.toggle)) {
+      limits = await $.providers.close({ session: sessionId, gate: data.toggle, isClosed: !liveLimits().closed.includes(data.toggle) })
     }
     if (typeof data.stop?.run === 'string') {
-      const key = typeof data.stop.key === 'string' ? data.stop.key : undefined
-      for (const r of runs.get(data.stop.run)?.reviewers ?? []) {
-        if (r.status === 'running' && (key === undefined || key === r.key)) stopReviewer(data.stop.run, r.key)
-      }
+      await liveReviews().stop(agentsOf($), data.stop.run, typeof data.stop.key === 'string' ? data.stop.key : undefined)
     }
     if (typeof data.open?.run === 'string') await open($, { run: data.open.run })
     if (typeof data.open?.agent === 'string') await open($, { agent: data.open.agent })
     if (typeof data.open?.group === 'string') await open($, { group: data.open.group })
     if (typeof data.open?.model === 'string') await open($, { model: data.open.model })
+    await syncBadge($)
     $.ui.invalidate('ui.render')
     return next(e)
   })
@@ -645,14 +637,15 @@ export const register: Register = (on, options) => {
         rows: room.drawer,
         now,
         opened: detail?.target ?? null,
-        catalog: liveCatalog(),
-        catalogNote,
-        sessionRuns: sessionRuns(),
+        groups,
+        reviews: sessionViews(),
         agents: claudeAgents.all(),
         record,
-        fallbackUsd: settings.fallbackUsd,
-        gates: gatesOf(custom),
+        limits: liveLimits(),
+        gates: gates(),
+        quota: quotaViews,
       })
+      if (quotaError !== null) props.quota.blocks.unshift({ title: 'Quota', color: '#e06c75', rows: [], notes: [quotaError] })
       const height = Math.min(room.drawer, overviewLines(props).length)
       filled = fillSlot(filled, DRAWER_SLOT, () => Client({ key: OVERVIEW_KEY, module: './overview.ts', props, width: OVERVIEW_COLUMNS, height }))
     }
@@ -670,18 +663,18 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__cc-crew__review_status' }, ($, e) => answer(status($, fields(e))))
 
   on('turn.complete', async ($, e, next) => {
-    // a turn's usage doesn't split its cache writes by lifetime; sessions run the 1-hour cache
-    const tokens = e.usage === undefined ? undefined : { ...claudeTokens(e.usage), written1h: e.usage.cache_creation_input_tokens }
     if (e.agentId === undefined) {
       record.turns += 1
-      if (e.usage !== undefined && tokens !== undefined) {
-        const key = modelKey(liveCatalog(), 'claude', e.usage.model)
-        record.main = sum([record.main, tokens])
-        record.chat = { ...record.chat, [key]: sum([record.chat[key], tokens]) }
-      }
+      // the conversation writes the 1-hour cache, and a turn's usage doesn't split its writes by lifetime
+      if (e.usage !== undefined) record.main = sum([record.main, { ...claudeTokens(e.usage), written1h: e.usage.cache_creation_input_tokens }])
       await keep($)
     } else {
-      if (claudeAgents.finished(e.agentId, e.reason === 'answer', tokens, await $.clock.now())) await keep($)
+      const tokens = e.usage === undefined ? undefined : claudeTokens(e.usage)
+      const key = claudeAgents.keyOf(e.agentId)
+      const at = await $.clock.now()
+      const cost = tokens === undefined || key === undefined ? undefined : await $.providers.cost({ key, report: { total: tokens, at } })
+      const turn = { isAnswer: e.reason === 'answer', usd: cost?.usd ?? 0, isEstimate: cost !== undefined && (cost.isEstimate || !cost.isPriced), at, ...(tokens === undefined ? {} : { tokens }) }
+      if (claudeAgents.finished(e.agentId, turn)) await keep($)
     }
     return next(e)
   })

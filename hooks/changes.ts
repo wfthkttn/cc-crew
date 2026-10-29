@@ -1,10 +1,13 @@
 import type { Io } from './io.ts'
 
-import { isSecretPath, join } from './scope.ts'
+import { join } from './paths.ts'
 
 export type ChangeSpec = 'uncommitted' | { base: string } | { commit: string }
 
 export type Change = { label: string; diff: string; untracked: string[] }
+
+/** Which of the absolute paths name secret files. */
+export type SecretsOf = (paths: string[]) => Promise<string[]>
 
 const MAX_DIFF = 400 * 1024
 
@@ -15,13 +18,16 @@ async function git(io: Io, repo: string, args: string[]): Promise<string> {
   return r.stdout
 }
 
-/** `path` as git names it, relative to `repo` with `/`. */
-const isSecret = (repo: string, path: string) => isSecretPath(join(repo, path))
-
 const names = (out: string) => out.split('\n').filter(l => l !== '')
 
+/** The paths as git names them, relative to `repo` with `/`, less those that name secrets. */
+async function withoutSecrets(repo: string, paths: string[], secretsOf: SecretsOf): Promise<string[]> {
+  const secret = new Set(await secretsOf(paths.map(p => join(repo, p))))
+  return paths.filter(p => !secret.has(join(repo, p)))
+}
+
 /** The change as a diff, secret files left out by name. */
-export async function changeOf(io: Io, repo: string, spec: ChangeSpec): Promise<Change> {
+export async function changeOf(io: Io, repo: string, spec: ChangeSpec, secretsOf: SecretsOf): Promise<Change> {
   let label: string
   let range: string[]
   let changed: string[]
@@ -30,7 +36,7 @@ export async function changeOf(io: Io, repo: string, spec: ChangeSpec): Promise<
     label = `The uncommitted changes (staged and unstaged) in \`${repo}\``
     range = ['diff', 'HEAD']
     changed = names(await git(io, repo, ['diff', 'HEAD', '--name-only']))
-    untracked = names(await git(io, repo, ['ls-files', '--others', '--exclude-standard'])).filter(p => !isSecret(repo, p))
+    untracked = await withoutSecrets(repo, names(await git(io, repo, ['ls-files', '--others', '--exclude-standard'])), secretsOf)
   } else if ('base' in spec) {
     const mergeBase = (await git(io, repo, ['merge-base', 'HEAD', spec.base])).trim()
     label = `The changes on this branch of \`${repo}\` since it left \`${spec.base}\` (merge base ${mergeBase.slice(0, 12)})`
@@ -42,7 +48,7 @@ export async function changeOf(io: Io, repo: string, spec: ChangeSpec): Promise<
     range = ['show', '--format=%H %s%n%n%b', spec.commit]
     changed = names(await git(io, repo, ['show', '--name-only', '--format=', spec.commit]))
   }
-  const kept = changed.filter(p => !isSecret(repo, p))
+  const kept = await withoutSecrets(repo, changed, secretsOf)
   const left = changed.length - kept.length
   const diff = kept.length === 0 ? '' : await git(io, repo, [...range, '--', ...kept])
   if (diff.length > MAX_DIFF) {

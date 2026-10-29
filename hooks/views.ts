@@ -1,23 +1,30 @@
 import type { SidebarBadgeLevel } from 'cc-sidebar'
+import type { ProvidersGroup, ProvidersLimits, ProvidersRoleLimit } from 'cc-providers'
 
 import { type ClaudeAgent, LIVE } from './agents.ts'
-import { type Catalog, costOf, groupOf, modelKey, priceOf } from './catalog.ts'
-import { wrap } from './detail.ts'
-import { OVERVIEW_COLUMNS } from './overview.ts'
-import { type Gate, type Limits, type Spent, groupLimit, sum, usd } from './limits.ts'
-import type { LimitsProps, LogProps, LogRow, OverviewProps, ReviewerRow, RunningProps, Tab, Target, TokenCells, UsageProps, UsageRow } from './overview-props.ts'
+import type {
+  LimitsProps,
+  LogProps,
+  LogRow,
+  OverviewProps,
+  ReviewerRow,
+  Role,
+  RoleRow,
+  RunningProps,
+  Tab,
+  Target,
+  TokenCells,
+  UsageProps,
+  UsageRow,
+} from './overview-props.ts'
+import { quotaProps, type QuotaView } from './quota.ts'
 import type { SessionRecord } from './record.ts'
-import type { ReviewerState, Run } from './runs.ts'
-import { type Tokens, shortCount } from './usage.ts'
+import { clockText, type ReviewView } from './reviews.ts'
+import { shortCount, sum, type Tokens, usd } from './usage.ts'
 
 export function clock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-}
-
-function timeOfDay(at: number): string {
-  const d = new Date(at)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 /** A row's tokens: input not read from a cache, and output; cache reads re-send the same context every request. */
@@ -29,96 +36,137 @@ function cells(t: Tokens | undefined): TokenCells {
   return { new: shortCount(t.in - t.cached), cached: shortCount(t.cached), out: shortCount(t.out) }
 }
 
-function pickText(r: ReviewerState): string {
-  const model = r.usedModel ?? r.model
-  return [model === 'default' ? undefined : model, r.effort].filter(x => x !== undefined).join(' · ')
+type Reviewer = ReviewView['reviewers'][number]
+
+function pickText(r: Reviewer): string {
+  const model = r.run?.usedModel ?? r.entry.model
+  return [model === 'default' ? undefined : model, r.entry.effort].filter(x => x !== undefined).join(' · ')
 }
 
-function reviewerRow(r: ReviewerState, now: number): ReviewerRow {
+const isLive = (r: Reviewer) => r.status === 'running' || r.status === 'starting'
+
+function reviewerRow(v: ReviewView, r: Reviewer, now: number): ReviewerRow {
+  const startedAt = r.run?.startedAt ?? v.review.createdAt
   return {
-    key: r.key,
-    provider: r.provider,
+    key: r.entry.key,
+    provider: r.entry.provider,
     pick: pickText(r),
     status: r.status,
-    elapsed: clock((r.endedAt ?? now) - r.startedAt),
-    isRunning: r.status === 'running',
-    tokens: tokensText(r.tokens),
+    elapsed: clock((isLive(r) ? now : (r.run?.endedAt ?? startedAt)) - startedAt),
+    isRunning: isLive(r),
+    tokens: tokensText(r.run?.tokens),
   }
 }
 
-const isRunning = (run: Run) => run.reviewers.some(r => r.status === 'running')
+const isRunning = (v: ReviewView) => v.reviewers.some(isLive)
 const agentType = (a: ClaudeAgent) => (a.workflow === undefined ? a.type : 'workflow')
 
-/** One reviewer or agent as usage lists it: the model it ran (catalog key), its group, and what it cost at API prices. */
-export type UsageItem = { key: string; group: string; what: string; status: string; startedAt: number; endedAt?: number; tokens?: Tokens; usd: number }
+/** One reviewer or agent as usage lists it: the model it ran, its pool, and what it cost at API prices. */
+export type UsageItem = { key: string; group: string; what: string; status: string; startedAt: number; endedAt?: number; tokens?: Tokens; usd: number; isGuessed: boolean }
 
-/** What a model's tokens cost, and whether the catalog placed and priced the model or crew stood in for it. */
-function costed(catalog: Catalog, key: string, tokens: Tokens | undefined) {
-  const { group, isPlaced } = groupOf(catalog, key)
-  const { price, isPriced } = priceOf(catalog, key)
-  return { group: group.id, usd: costOf(tokens, price), isGuessed: !isPlaced || !isPriced }
+/** The pool a model counts in, as providers' catalog places it; one it doesn't place counts in its provider's first. */
+function groupOf(groups: readonly ProvidersGroup[], key: string): { id: string; isPlaced: boolean } {
+  const cut = key.indexOf('/')
+  const provider = key.slice(0, cut)
+  const placed = groups.find(g => g.provider === provider && g.models.includes(key.slice(cut + 1)))
+  if (placed !== undefined) return { id: placed.id, isPlaced: true }
+  return { id: groups.find(g => g.provider === provider)?.id ?? provider, isPlaced: false }
 }
 
-/** Each reviewer and agent the session started, with its model, group and cost. */
-export function itemsOf(catalog: Catalog, sessionRuns: readonly Run[], agents: readonly ClaudeAgent[]): UsageItem[] {
-  const item = (key: string, what: string, status: string, startedAt: number, endedAt: number | undefined, tokens: Tokens | undefined): UsageItem => {
-    const { group, usd } = costed(catalog, key, tokens)
-    return { key, group, what, status, startedAt, usd, ...(endedAt === undefined ? {} : { endedAt }), ...(tokens === undefined ? {} : { tokens }) }
+/** Each reviewer and agent the session started, with its model, pool and cost. */
+export function itemsOf(groups: readonly ProvidersGroup[], reviews: readonly ReviewView[], agents: readonly ClaudeAgent[]): UsageItem[] {
+  const item = (key: string, rest: Omit<UsageItem, 'key' | 'group' | 'isGuessed'>, isEstimate: boolean): UsageItem => {
+    const { id, isPlaced } = groupOf(groups, key)
+    return { key, group: id, ...rest, isGuessed: isEstimate || !isPlaced }
   }
   return [
-    ...sessionRuns.flatMap(run =>
-      run.reviewers.map(r => item(modelKey(catalog, r.provider, r.usedModel ?? r.model), `review: ${run.description} (${r.key})`, r.status, r.startedAt, r.endedAt, r.tokens)),
+    ...reviews.flatMap(v =>
+      v.reviewers.flatMap(r => {
+        const run = r.run
+        if (run === undefined) return []
+        const rest = {
+          what: `review: ${v.review.description} (${r.entry.key})`,
+          status: r.status,
+          startedAt: run.startedAt,
+          usd: run.costUsd,
+          ...(run.endedAt === undefined ? {} : { endedAt: run.endedAt }),
+          ...(run.tokens === undefined ? {} : { tokens: run.tokens }),
+        }
+        return [item(run.key, rest, run.isCostEstimate)]
+      }),
     ),
-    ...agents.map(a => item(modelKey(catalog, 'claude', a.model), `${agentType(a)}: ${a.description}`, a.status, a.startedAt, a.endedAt, a.tokens)),
+    ...agents.map(a =>
+      item(
+        a.key,
+        {
+          what: `${agentType(a)}: ${a.description}`,
+          status: a.status,
+          startedAt: a.startedAt,
+          usd: a.usd,
+          ...(a.endedAt === undefined ? {} : { endedAt: a.endedAt }),
+          ...(a.tokens === undefined ? {} : { tokens: a.tokens }),
+        },
+        a.isEstimate,
+      ),
+    ),
   ]
 }
 
 const modelName = (key: string) => key.slice(key.indexOf('/') + 1)
 
-/** What the session spent: this chat, then each group with its models under it, reviewers and agents together. */
-export function usageProps(catalog: Catalog, items: readonly UsageItem[], record: SessionRecord, note: string | null): UsageProps {
-  const chat = Object.entries(record.chat).map(([key, t]) => costed(catalog, key, t).usd)
-  const rows: UsageRow[] = [
-    { label: 'this chat', count: `${record.turns} turns`, usd: usd(chat.reduce((n, x) => n + x, 0)), isPart: false, isGuessed: false, open: null, ...cells(record.main) },
-  ]
-  for (const group of catalog.groups) {
-    const inGroup = items.filter(i => i.group === group.id)
-    if (inGroup.length === 0) continue
-    rows.push({ label: group.name, ...totals(inGroup), isPart: false, isGuessed: false, open: { group: group.id } })
-    for (const key of [...new Set(inGroup.map(i => i.key))].sort()) {
-      rows.push({ label: modelName(key), ...totals(inGroup.filter(i => i.key === key)), isPart: true, isGuessed: costed(catalog, key, undefined).isGuessed, open: { model: key } })
-    }
-  }
-  return { rows, isGuessing: rows.some(r => r.isGuessed), note: note === null ? [] : wrap(note, OVERVIEW_COLUMNS) }
-}
-
 function totals(items: readonly UsageItem[]) {
   return { count: String(items.length), usd: usd(items.reduce((n, i) => n + i.usd, 0)), ...cells(sum(items.map(i => i.tokens))) }
 }
 
-/** A group's or a model's details for the pop-out: what it spent, against the group's limit, then each reviewer and agent, newest first. */
-export function usageDetail(catalog: Catalog, items: readonly UsageItem[], limits: Limits, target: { group: string } | { model: string }, now: number): string {
+/** What the session spent: this chat as providers metered it, then each pool with its models under it, reviewers and agents together. */
+export function usageProps(groups: readonly ProvidersGroup[], items: readonly UsageItem[], record: SessionRecord, limits: ProvidersLimits): UsageProps {
+  const chatUsd = limits.pools.reduce((n, p) => n + p.main.spentUsd, 0)
+  const rows: UsageRow[] = [{ label: 'this chat', count: `${record.turns} turns`, usd: usd(chatUsd), isPart: false, isGuessed: false, open: null, ...cells(record.main) }]
+  for (const group of groups) {
+    const inGroup = items.filter(i => i.group === group.id)
+    if (inGroup.length === 0) continue
+    rows.push({ label: group.name, ...totals(inGroup), isPart: false, isGuessed: false, open: { group: group.id } })
+    for (const key of [...new Set(inGroup.map(i => i.key))].sort()) {
+      const ofKey = inGroup.filter(i => i.key === key)
+      rows.push({ label: modelName(key), ...totals(ofKey), isPart: true, isGuessed: ofKey.some(i => i.isGuessed), open: { model: key } })
+    }
+  }
+  return { rows, isGuessing: rows.some(r => r.isGuessed) }
+}
+
+const tokensLine = (t: Tokens | undefined) =>
+  t === undefined ? 'no usage reported' : `${shortCount(t.in - t.cached)} new · ${shortCount(t.cached)} cached · ${shortCount(t.out)} out`
+
+const limitText = (l: ProvidersRoleLimit) => (l.limitUsd === null ? `${usd(l.spentUsd)}, no limit` : `${usd(l.spentUsd)} of ${usd(l.limitUsd)}`)
+
+/** A pool's or a model's details for the pop-out: what it spent, against the pool's limits, then each reviewer and agent, newest first. */
+export function usageDetail(groups: readonly ProvidersGroup[], items: readonly UsageItem[], limits: ProvidersLimits, target: { group: string } | { model: string }, now: number): string {
   const shown = items.filter(i => ('group' in target ? i.group === target.group : i.key === target.model)).sort((a, b) => b.startedAt - a.startedAt)
-  const group = 'group' in target ? target.group : groupOf(catalog, target.model).group.id
-  const spent = items.filter(i => i.group === group).reduce((n, i) => n + i.usd, 0)
-  const name = catalog.groups.find(g => g.id === group)?.name ?? group
+  const group = 'group' in target ? target.group : groupOf(groups, target.model).id
+  const pool = limits.pools.find(p => p.pool === group)
   const head = [
     `${shown.length} run${shown.length === 1 ? '' : 's'} · ${usd(shown.reduce((n, i) => n + i.usd, 0))} at API prices`,
-    `${name} group: ${usd(spent)} of ${usd(groupLimit(limits, group))} this session`,
+    pool === undefined ? `${group}: no limits known` : `${pool.name} pool this session: helpers ${limitText(pool.helpers)}; chat ${limitText(pool.main)}`,
     `Tokens: ${tokensLine(sum(shown.map(i => i.tokens)))}`,
     '',
   ]
   const lines = shown.flatMap(i => [
-    `${timeOfDay(i.startedAt)} ${i.what}${'group' in target ? ` · ${modelName(i.key)}` : ''}`,
-    `└ ${i.status}, ${clock((i.endedAt ?? now) - i.startedAt)} · ${tokensLine(i.tokens)} · ${usd(i.usd)}`,
+    `${clockText(i.startedAt)} ${i.what}${'group' in target ? ` · ${modelName(i.key)}` : ''}`,
+    `└ ${i.status}, ${clock((i.endedAt ?? now) - i.startedAt)} · ${tokensLine(i.tokens)} · ${usd(i.usd)}${i.isGuessed ? ' at most' : ''}`,
   ])
   return [...head, ...lines].join('\n')
 }
 
-export function runningProps(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], now: number): RunningProps {
-  const reviews = sessionRuns.filter(isRunning).map(run => ({
-    at: run.createdAt,
-    row: { kind: 'review' as const, id: run.id, description: run.description, elapsed: clock(now - run.createdAt), reviewers: run.reviewers.map(r => reviewerRow(r, now)) },
+export function runningProps(reviews: readonly ReviewView[], agents: readonly ClaudeAgent[], now: number): RunningProps {
+  const running = reviews.filter(isRunning).map(v => ({
+    at: v.review.createdAt,
+    row: {
+      kind: 'review' as const,
+      id: v.review.id,
+      description: v.review.description,
+      elapsed: clock(now - v.review.createdAt),
+      reviewers: v.reviewers.map(r => reviewerRow(v, r, now)),
+    },
   }))
   const live = agents
     .filter(a => LIVE.includes(a.status))
@@ -126,43 +174,42 @@ export function runningProps(sessionRuns: readonly Run[], agents: readonly Claud
       at: a.startedAt,
       row: { kind: 'agent' as const, id: a.id, type: agentType(a), description: a.description, status: a.status, elapsed: clock(now - a.startedAt), tokens: tokensText(a.tokens) },
     }))
-  return { live: [...reviews, ...live].sort((a, b) => b.at - a.at).map(x => x.row) }
+  return { live: [...running, ...live].sort((a, b) => b.at - a.at).map(x => x.row) }
 }
 
 /** Statuses short enough for a tally to fit the log's status column. */
-const SHORT_STATUS: Record<string, string> = { stopped: 'stop', failed: 'fail', timeout: 'time', signed_out: 'auth', quota: 'quota', left_roots: 'left' }
+const SHORT_STATUS: Record<string, string> = { stopped: 'stop', failed: 'fail', timeout: 'time', signed_out: 'auth', quota: 'quota', limit: 'limit', left_roots: 'left' }
 
 /** `3 ok`, `2 ok · 1 stop`. */
-function tally(run: Run): string {
+function tally(v: ReviewView): string {
   const counts = new Map<string, number>()
-  for (const r of run.reviewers) counts.set(r.status, (counts.get(r.status) ?? 0) + 1)
+  for (const r of v.reviewers) counts.set(r.status, (counts.get(r.status) ?? 0) + 1)
   return [...counts].map(([status, n]) => `${n} ${SHORT_STATUS[status] ?? status}`).join(' · ')
 }
 
-function runEnd(run: Run): number {
-  return Math.max(run.createdAt, ...run.reviewers.map(r => r.endedAt ?? r.startedAt))
+function reviewEnd(v: ReviewView): number {
+  return Math.max(v.review.createdAt, ...v.reviewers.map(r => r.run?.endedAt ?? r.run?.startedAt ?? v.review.createdAt))
 }
 
-
-/** Every finished run and agent, newest first, one row each. */
-export function logProps(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], page: number): LogProps {
+/** Every finished review and agent, newest first, one row each. */
+export function logProps(reviews: readonly ReviewView[], agents: readonly ClaudeAgent[], page: number): LogProps {
   const rows: (LogRow & { at: number })[] = [
-    ...sessionRuns
-      .filter(run => !isRunning(run))
-      .map(run => ({
-        at: run.createdAt,
-        time: timeOfDay(run.createdAt),
-        what: `review: ${run.description}`,
-        status: tally(run),
-        took: clock(runEnd(run) - run.createdAt),
-        open: { run: run.id },
-        ...cells(sum(run.reviewers.map(r => r.tokens))),
+    ...reviews
+      .filter(v => !isRunning(v))
+      .map(v => ({
+        at: v.review.createdAt,
+        time: clockText(v.review.createdAt),
+        what: `review: ${v.review.description}`,
+        status: tally(v),
+        took: clock(reviewEnd(v) - v.review.createdAt),
+        open: { run: v.review.id },
+        ...cells(sum(v.reviewers.map(r => r.run?.tokens))),
       })),
     ...agents
       .filter(a => !LIVE.includes(a.status))
       .map(a => ({
         at: a.startedAt,
-        time: timeOfDay(a.startedAt),
+        time: clockText(a.startedAt),
         what: `${agentType(a)}: ${a.description}`,
         status: a.status,
         took: clock((a.endedAt ?? a.startedAt) - a.startedAt),
@@ -173,21 +220,23 @@ export function logProps(sessionRuns: readonly Run[], agents: readonly ClaudeAge
   return { rows: rows.map(({ at: _, ...row }) => row), page }
 }
 
-const tokensLine = (t: Tokens | undefined) =>
-  t === undefined ? 'no usage reported' : `${shortCount(t.in - t.cached)} new · ${shortCount(t.cached)} cached · ${shortCount(t.out)} out`
-
-/** A run's details for the pop-out: when, how it went, each reviewer, then the brief. */
-export function runDetail(run: Run, brief: string): string {
+/** A review's details for the pop-out: when, how it went, each reviewer, then the brief. */
+export function runDetail(v: ReviewView, brief: string): string {
+  const review = v.review
   const head = [
-    `Started ${timeOfDay(run.createdAt)} · took ${clock(runEnd(run) - run.createdAt)} · ${tally(run)}`,
-    `Read: ${run.roots.length === 0 ? 'nothing' : run.roots.join(', ')} · web ${run.web ? 'on' : 'off'}${run.changes === undefined ? '' : ` · ${run.changes}`}`,
+    `Started ${clockText(review.createdAt)} · took ${clock(reviewEnd(v) - review.createdAt)} · ${tally(v)}`,
+    `Read: ${review.roots.length === 0 ? 'nothing' : review.roots.join(', ')} · web ${review.web ? 'on' : 'off'}${review.changes === undefined ? '' : ` · ${review.changes}`}`,
     '',
-    ...run.reviewers.map(r => {
+    ...v.reviewers.map(r => {
       const pick = pickText(r)
-      const findings = r.findings === undefined ? '' : ` · ${r.findings} finding${r.findings === 1 ? '' : 's'}`
-      return `${r.provider}${pick === '' ? '' : ` (${pick})`}: ${r.status}, ${clock((r.endedAt ?? r.startedAt) - r.startedAt)} · ${tokensLine(r.tokens)}${findings}`
+      const findings = r.entry.findings === undefined ? '' : ` · ${r.entry.findings} finding${r.entry.findings === 1 ? '' : 's'}`
+      const run = r.run
+      const took = run === undefined ? '' : `, ${clock((run.endedAt ?? run.startedAt) - run.startedAt)}`
+      const spent = run === undefined ? '' : ` · ${usd(run.costUsd)}${run.isCostEstimate ? ' at most' : ''}`
+      const warm = run?.cacheUntil === undefined ? '' : ` · cache warm until ${clockText(run.cacheUntil)}`
+      return `${r.entry.provider}${pick === '' ? '' : ` (${pick})`}: ${r.status}${took} · ${tokensLine(run?.tokens)}${spent}${findings}${warm}`
     }),
-    `Reports: ${run.reportDir}`,
+    `Reports: ${review.reportDir}`,
     '',
     '── Brief ──',
   ]
@@ -198,8 +247,8 @@ export function runDetail(run: Run, brief: string): string {
 export function agentDetail(a: ClaudeAgent, prompt: string, now: number): string {
   const head = [
     `${a.type}${a.model === undefined ? '' : ` on ${a.model}`} · ${a.status}`,
-    `Started ${timeOfDay(a.startedAt)} · ${LIVE.includes(a.status) ? 'running for' : 'took'} ${clock((a.endedAt ?? now) - a.startedAt)}`,
-    `Tokens: ${tokensLine(a.tokens)}`,
+    `Started ${clockText(a.startedAt)} · ${LIVE.includes(a.status) ? 'running for' : 'took'} ${clock((a.endedAt ?? now) - a.startedAt)}`,
+    `Tokens: ${tokensLine(a.tokens)} · ${usd(a.usd)}${a.isEstimate ? ' at most' : ''}`,
     ...(a.workflow === undefined ? [] : [`Workflow run ${a.workflow}`]),
     '',
     '── Prompt ──',
@@ -207,48 +256,39 @@ export function agentDetail(a: ClaudeAgent, prompt: string, now: number): string
   return [...head, prompt].join('\n')
 }
 
-/** The catalog's group limits with this session's raises and switches. */
-export function limitsOf(catalog: Catalog, fallbackUsd: number, record: SessionRecord): Limits {
-  return {
-    isOn: !record.isLimitsOff,
-    groups: Object.fromEntries(catalog.groups.map(g => [g.id, (g.limitUsd ?? fallbackUsd) + (record.raises.groups[g.id] ?? 0)])),
-    fallbackUsd,
-    closed: record.closed,
-  }
-}
-
-/** $ at API prices each group's reviewers and agents spent. */
-export function spentOf(items: readonly UsageItem[]): Spent {
-  const spent: Record<string, number> = {}
-  for (const i of items) spent[i.group] = (spent[i.group] ?? 0) + i.usd
-  return spent
-}
-
-/** What one press of a group's raise adds, in $. */
+/** What one press of a raise adds, in $. */
 export const RAISES_USD = [1, 10] as const
 
-/** Every group of the catalog: what it spent against its limit, a raise, and over once spent reaches it; a switch per gate. */
-export function limitsProps(catalog: Catalog, limits: Limits, spent: Spent, gates: readonly Gate[]): LimitsProps {
+function roleRow(pool: string, role: Role, l: ProvidersRoleLimit): RoleRow {
+  const raises = l.limitUsd === null ? [] : RAISES_USD.map(n => ({ label: `+$${n}`, raise: { pool, role, usd: n } }))
+  return { role, spent: usd(l.spentUsd), limit: l.limitUsd === null ? null : usd(l.limitUsd), raises, isOver: l.isOver }
+}
+
+/** Every pool: its helpers' spend against their limit, the conversation's where it has a limit or spent, raises; a switch per gate. */
+export function limitsProps(limits: ProvidersLimits, gates: readonly string[]): LimitsProps {
   return {
     isOn: limits.isOn,
-    groups: catalog.groups.map(g => {
-      const used = spent[g.id] ?? 0
-      const limit = groupLimit(limits, g.id)
-      const raises = RAISES_USD.map(n => ({ label: `+$${n}`, raise: { group: g.id, usd: n } }))
-      return { label: g.name, spent: usd(used), limit: usd(limit), raises, isOver: used >= limit }
-    }),
+    pools: limits.pools.map(p => ({
+      label: p.name,
+      roles: [roleRow(p.pool, 'helpers', p.helpers), ...(p.main.limitUsd !== null || p.main.spentUsd > 0 ? [roleRow(p.pool, 'main', p.main)] : [])],
+      isPaused: limits.isOn && p.pausedAt !== null,
+    })),
     gates: gates.map(gate => ({ gate, isOpen: !limits.closed.includes(gate) })),
   }
 }
 
 export type Badge = { count: number; level: SidebarBadgeLevel }
 
-/** The tab's badge: reviewers and Claude's agents running now, plus the limits reached; amber once one is. */
-export function badgeOf(sessionRuns: readonly Run[], agents: readonly ClaudeAgent[], limits: LimitsProps): Badge {
-  const running = sessionRuns.flatMap(run => run.reviewers).filter(r => r.status === 'running').length
+/**
+ * The tab's badge: reviewers and Claude's agents running now, plus the pools at a limit; red while the conversation
+ * is paused in one, amber at a helpers' limit.
+ */
+export function badgeOf(reviews: readonly ReviewView[], agents: readonly ClaudeAgent[], limits: ProvidersLimits): Badge {
+  const running = reviews.flatMap(v => v.reviewers).filter(isLive).length
   const live = agents.filter(a => LIVE.includes(a.status)).length
-  const reached = limits.isOn ? limits.groups.filter(r => r.isOver).length : 0
-  return { count: running + live + reached, level: reached > 0 ? 'attention' : 'info' }
+  const paused = limits.isOn ? limits.pools.filter(p => p.pausedAt !== null).length : 0
+  const over = limits.isOn ? limits.pools.filter(p => p.pausedAt === null && p.helpers.isOver).length : 0
+  return { count: running + live + paused + over, level: paused > 0 ? 'urgent' : over > 0 ? 'attention' : 'info' }
 }
 
 export type ViewInput = {
@@ -257,27 +297,27 @@ export type ViewInput = {
   rows: number
   now: number
   opened: Target | null
-  catalog: Catalog
-  catalogNote: string | null
-  sessionRuns: readonly Run[]
+  groups: readonly ProvidersGroup[]
+  reviews: readonly ReviewView[]
   agents: readonly ClaudeAgent[]
   record: SessionRecord
-  fallbackUsd: number
-  gates: readonly Gate[]
+  limits: ProvidersLimits
+  gates: readonly string[]
+  quota: readonly QuotaView[]
 }
 
 export function overviewProps(v: ViewInput): OverviewProps {
-  const running = runningProps(v.sessionRuns, v.agents, v.now)
-  const log = logProps(v.sessionRuns, v.agents, v.page)
-  const items = itemsOf(v.catalog, v.sessionRuns, v.agents)
+  const running = runningProps(v.reviews, v.agents, v.now)
+  const log = logProps(v.reviews, v.agents, v.page)
   return {
     tab: v.tab,
     counts: { running: running.live.length, log: log.rows.length },
     rows: v.rows,
     opened: v.opened,
     running,
-    usage: usageProps(v.catalog, items, v.record, v.catalogNote),
+    usage: usageProps(v.groups, itemsOf(v.groups, v.reviews, v.agents), v.record, v.limits),
     log,
-    limits: limitsProps(v.catalog, limitsOf(v.catalog, v.fallbackUsd, v.record), spentOf(items), v.gates),
+    limits: limitsProps(v.limits, v.gates),
+    quota: quotaProps(v.quota, v.now),
   }
 }

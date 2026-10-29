@@ -1,43 +1,18 @@
-import type { Kind } from './config.ts'
+import type { ProvidersTokens } from 'cc-providers'
 
-/** Tokens one reviewer or agent spent, alike for every provider. */
-export type Tokens = {
-  /** Every input token, the cached ones included. */
-  in: number
-  /** The part of `in` the provider's cache served. */
-  cached: number
-  /** The part of `in` written to the cache, where the provider reports it apart (Claude). */
-  written?: number
-  /** The part of `written` that went to the 1-hour cache, where the report splits writes by lifetime. */
-  written1h?: number
-  /** Every generated token, reasoning included. */
-  out: number
-  /** The part of `out` spent reasoning, where the provider reports it. */
-  reasoning?: number
-}
+/** Tokens one reviewer or agent spent, as cc-providers counts them for every provider. */
+export type Tokens = ProvidersTokens
 
 const num = (o: Record<string, unknown>, key: string): number => (typeof o[key] === 'number' ? (o[key] as number) : 0)
 
-/** A reviewer's own usage report as Tokens, read the way its kind reports; undefined when it reported none. */
-export function tokensOf(kind: Kind, raw: unknown): Tokens | undefined {
-  if (raw === null || typeof raw !== 'object') return undefined
-  const u = raw as Record<string, unknown>
-  switch (kind) {
-    case 'codex':
-      // Codex counts its cached input inside input_tokens, and reasoning inside output_tokens.
-      return { in: num(u, 'input_tokens'), cached: num(u, 'cached_input_tokens'), out: num(u, 'output_tokens'), reasoning: num(u, 'reasoning_output_tokens') }
-    case 'antigravity':
-      // Antigravity counts cache reads apart from input_tokens, and thinking inside output_tokens.
-      return {
-        in: num(u, 'input_tokens') + num(u, 'cache_read_tokens'),
-        cached: num(u, 'cache_read_tokens'),
-        out: num(u, 'output_tokens'),
-        reasoning: num(u, 'thinking_tokens'),
-      }
-    case 'claude':
-    case 'claude-p':
-      return claudeTokens(u)
-  }
+/** The counts added up; `written` and `written1h` only where some were reported. */
+export function sum(all: readonly (Tokens | undefined)[]): Tokens {
+  return all.reduce<Tokens>((s, t) => {
+    if (t === undefined) return s
+    const written = s.written === undefined && t.written === undefined ? {} : { written: (s.written ?? 0) + (t.written ?? 0) }
+    const written1h = s.written1h === undefined && t.written1h === undefined ? {} : { written1h: (s.written1h ?? 0) + (t.written1h ?? 0) }
+    return { in: s.in + t.in, cached: s.cached + t.cached, ...written, ...written1h, out: s.out + t.out }
+  }, { in: 0, cached: 0, out: 0 })
 }
 
 /** A Claude turn's usage: input_tokens is only the part neither read from nor written to the cache. */
@@ -56,3 +31,5 @@ export function shortCount(n: number): string {
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`
   return String(n)
 }
+
+export const usd = (n: number) => `$${n.toFixed(2)}`

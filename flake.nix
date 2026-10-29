@@ -1,5 +1,5 @@
 {
-  description = "cc-crew: reviews by Codex, Antigravity and Claude reviewers, as a Claude Code mod";
+  description = "cc-crew: reviews by other providers' models through cc-agents, as a Claude Code mod";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -19,7 +19,6 @@
         installPhase = ''
           mkdir -p $out/share/cc-crew/claude-code/.claude-plugin
           cp .claude-plugin/plugin.json $out/share/cc-crew/claude-code/.claude-plugin/
-          cp models.json $out/share/cc-crew/claude-code/
           cp -r hooks $out/share/cc-crew/claude-code/hooks
         '';
       };

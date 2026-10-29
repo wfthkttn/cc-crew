@@ -1,27 +1,15 @@
 {
   "name": "cc-crew",
-  "version": "0.3.0",
-  "description": "Reviews by other harnesses' models (Codex, Antigravity) and Claude, under one tool with enforced read limits",
+  "version": "0.4.0",
+  "description": "Reviews by other providers' models, run headless through cc-agents, and a sidebar tab over the session's agents, spend, limits and quota",
   "author": { "name": "alex" },
-  "dependencies": ["cc-conversation", "cc-sidebar"],
+  "dependencies": ["cc-conversation", "cc-sidebar", "cc-providers", "cc-agents"],
   "userConfig": {
-    "codex_bin": {
-      "type": "string",
-      "title": "Codex CLI",
-      "description": "Command or absolute path of the Codex CLI",
-      "default": "codex"
-    },
-    "agy_bin": {
-      "type": "string",
-      "title": "Antigravity CLI",
-      "description": "Command or absolute path of the Antigravity CLI",
-      "default": "agy"
-    },
     "reviewers": {
       "type": "string",
       "multiple": true,
       "title": "Default reviewers",
-      "description": "Providers a review runs when the call names none: codex, antigravity, claude, or a name from ~/.config/crew/reviewers.json",
+      "description": "Providers a review runs when the call names none: any provider in providers.json with a cli: endpoint, such as codex, antigravity, claude or zai",
       "default": ["codex", "antigravity", "claude"]
     },
     "codex_model": {
@@ -47,12 +35,6 @@
       "title": "Antigravity effort",
       "description": "Effort an Antigravity reviewer runs at when the call names none; empty for the model's default",
       "default": ""
-    },
-    "claude_bin": {
-      "type": "string",
-      "title": "Claude Code",
-      "description": "Command or absolute path of Claude Code, which runs the Claude reviewer headless",
-      "default": "claude"
     },
     "claude_model": {
       "type": "string",
@@ -80,13 +62,6 @@
       "default": 1800,
       "min": 60,
       "max": 7200
-    },
-    "limit_group_usd": {
-      "type": "number",
-      "title": "Fallback group limit ($)",
-      "description": "What one session's reviewers and Claude agents may spend, in $ at API prices, in a quota group that models.json gives no limit; past it, work in that group is refused",
-      "default": 10,
-      "min": 0
     }
   }
 }

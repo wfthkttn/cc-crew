@@ -1,11 +1,11 @@
-import type { Gate } from './limits'
+export type Tab = 'running' | 'usage' | 'limits' | 'quota' | 'log'
 
-export type Tab = 'running' | 'usage' | 'limits' | 'log'
+export type Role = 'main' | 'helpers'
 
-/** A raise press: `usd` more for one quota group, by its id. */
-export type Raise = { group: string; usd: number }
+/** A raise press: `usd` more for one role in one pool, by the pool's id. */
+export type Raise = { pool: string; role: Role; usd: number }
 
-/** What the pop-out shows: a run, an agent, a quota group (by id) or a model (by catalog key). */
+/** What the pop-out shows: a review, an agent, a pool (by id) or a model (by its `<provider>/<model>` key). */
 export type Target = { run: string } | { agent: string } | { group: string } | { model: string }
 
 /** What a press on the overview asks for. */
@@ -15,7 +15,7 @@ export type OverviewAction =
   | { open: Target }
   | { page: 1 | -1 }
   | { raise: Raise }
-  | { toggle: Gate }
+  | { toggle: string }
   | { switchLimits: true }
 
 export type ReviewerRow = {
@@ -41,37 +41,48 @@ export type TokenCells = { new: string; cached: string; out: string }
 export type RunningProps = { live: (RunRow | AgentRow)[] }
 
 /**
- * A row of the session's usage: this chat, then each quota group with its models under it (`isPart`); `usd` at API
- * prices; `isGuessed` for a model models.json neither places nor prices, so crew stood in; a group's or model's row opens it.
+ * A row of the session's usage: this chat, then each pool with its models under it (`isPart`); `usd` at API prices;
+ * `isGuessed` where some of it was priced at the dearest it could be; a pool's or model's row opens it.
  */
 export type UsageRow = TokenCells & { label: string; count: string; usd: string; isPart: boolean; isGuessed: boolean; open: Target | null }
 
-/** `note`: why the catalog stands on models.json alone where it would ask a tool, as the drawer's lines; empty when it doesn't. */
-export type UsageProps = { rows: UsageRow[]; isGuessing: boolean; note: string[] }
+export type UsageProps = { rows: UsageRow[]; isGuessing: boolean }
 
-/** One finished run or agent, newest first; a press opens its details. */
+/** One finished review or agent, newest first; a press opens its details. */
 export type LogRow = TokenCells & { time: string; what: string; status: string; took: string; open: Target }
 
 export type LogProps = { rows: LogRow[]; page: number }
 
-/** `isOver`: what is spent reached the limit, so new work on it is refused. */
-export type LimitRow = { label: string; spent: string; limit: string; raises: { label: string; raise: Raise }[]; isOver: boolean }
+/** One role's spend in a pool against its limit; `limit` null where the pool sets none, so it has no raises. */
+export type RoleRow = { role: Role; spent: string; limit: string | null; raises: { label: string; raise: Raise }[]; isOver: boolean }
 
-/** `isOn` false: the group limits are shown but not enforced; the gates still are. */
-export type LimitsProps = { isOn: boolean; groups: LimitRow[]; gates: { gate: Gate; isOpen: boolean }[] }
+/** A pool: its helpers, then its conversation where it has a limit or spent; `isPaused` while the conversation is paused there. */
+export type LimitRow = { label: string; roles: RoleRow[]; isPaused: boolean }
+
+/** `isOn` false: the limits are shown but not enforced; the gates still are. */
+export type LimitsProps = { isOn: boolean; pools: LimitRow[]; gates: { gate: string; isOpen: boolean }[] }
+
+/** One window of a pool: how much is left and when it resets. */
+export type QuotaRow = { pool: string; window: string; left: string; resets: string; isLow: boolean }
+
+/** A provider's quota: its windows by pool, and why some are missing. */
+export type QuotaBlock = { title: string; color: string; rows: QuotaRow[]; notes: string[] }
+
+export type QuotaProps = { blocks: QuotaBlock[] }
 
 export type OverviewProps = {
   tab: Tab
-  /** What the tab row counts: runs and agents running, entries logged. */
+  /** What the tab row counts: reviews and agents running, entries logged. */
   counts: { running: number; log: number }
   /** The rows the drawer has for the view, the tab row included. */
   rows: number
-  /** The run or agent the pop-out shows, so its line reads as open. */
+  /** The review, agent, pool or model the pop-out shows, so its line reads as open. */
   opened: Target | null
   running: RunningProps
   usage: UsageProps
   log: LogProps
   limits: LimitsProps
+  quota: QuotaProps
 }
 
 /** One page of a details text: `lines` are the page's, `first`–`last` of `total` count from 1. */

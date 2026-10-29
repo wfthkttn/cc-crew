@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-import type { LimitRow, LimitsProps, LogProps, OverviewAction, OverviewProps, RunningProps, Tab, UsageProps } from './overview-props'
+import type { LimitsProps, LogProps, OverviewAction, OverviewProps, QuotaProps, RoleRow, RunningProps, Tab, UsageProps } from './overview-props'
 
 export const OVERVIEW_COLUMNS = 64
 
@@ -66,9 +66,9 @@ function tabLines(props: OverviewProps): Line[] {
   const label = (tab: Tab): string => {
     if (tab === 'running') return ` Running${props.counts.running > 0 ? ' ' + props.counts.running : ''} `
     if (tab === 'log') return ` Log${props.counts.log > 0 ? ' ' + props.counts.log : ''} `
-    return tab === 'usage' ? ' Usage ' : ' Limits '
+    return tab === 'usage' ? ' Usage ' : tab === 'limits' ? ' Limits ' : ' Quota '
   }
-  const tabs: Tab[] = ['running', 'usage', 'limits', 'log']
+  const tabs: Tab[] = ['running', 'usage', 'limits', 'quota', 'log']
   const row: Line = tabs.flatMap((tab, i) => [
     ...(i > 0 ? [{ text: '│', color: MUTED }] : []),
     { text: label(tab), action: { tab }, ...(tab === props.tab ? { color: HEADING, bold: true } : { color: MUTED }) },
@@ -139,7 +139,7 @@ function table(columns: readonly Column[], rows: readonly TableRow[]): Line[] {
   ]
 }
 
-/** A model's limit name, `agy gemini-3.8-flash`, leads each row. */
+/** A pool's or model's name, `gemini-3.8-flash`, leads each row. */
 const USAGE_COLUMNS: readonly Column[] = [
   { title: '', width: 20 },
   { title: 'runs', width: 9, isNumber: true },
@@ -149,7 +149,7 @@ const USAGE_COLUMNS: readonly Column[] = [
   { title: '$ API', width: 8, isNumber: true },
 ]
 
-/** This chat, then each quota group in bold with its models under it; a group's or model's row opens its reviewers and agents. */
+/** This chat, then each pool in bold with its models under it; a pool's or model's row opens its reviewers and agents. */
 function usageLines(props: UsageProps, opened: OverviewProps['opened']): Line[] {
   const rows = props.rows.map(r => ({
     cells: [`${r.isPart ? '  ' : ''}${r.label}${r.isGuessed ? ' ?' : ''}`, r.count, r.new, r.cached, r.out, r.usd],
@@ -159,10 +159,9 @@ function usageLines(props: UsageProps, opened: OverviewProps['opened']): Line[] 
   return [
     ...table(USAGE_COLUMNS, rows),
     [{ text: '' }],
-    ...props.note.map(line => [{ text: line, color: OVER }]),
-    ...(props.isGuessing ? [muted('? not in models.json: counted in its vendor\'s first group,'), muted('  at its group\'s dearest price.')] : []),
+    ...(props.isGuessing ? [muted('? priced at the dearest it could be, or not placed in a pool'), muted('  by providers.json: an upper bound.')] : []),
     muted('$ at API prices weighs each model as its quota does.'),
-    muted('Press a group or model for its reviewers and agents.'),
+    muted('Press a pool or model for its reviewers and agents.'),
   ]
 }
 
@@ -207,10 +206,12 @@ function logLines(props: LogProps, rows: number, opened: OverviewProps['opened']
   return [...lines, nav]
 }
 
-/** Room for a group's name such as `Claude and GPT`. */
-const LIMIT_LABEL_COLUMNS = 20
+/** Room for a pool's name such as `Claude and GPT`. */
+const LIMIT_LABEL_COLUMNS = 16
+/** `helpers` or `chat`. */
+const ROLE_COLUMNS = 8
 /** The limit beside what was spent: `$10.00`. */
-const LIMIT_COLUMNS = 10
+const LIMIT_COLUMNS = 9
 
 function limitsLines(props: LimitsProps): Line[] {
   const on: Line = [
@@ -218,11 +219,13 @@ function limitsLines(props: LimitsProps): Line[] {
     ...pill(props.isOn ? '● on' : '○ off', { switchLimits: true }, !props.isOn),
     { text: props.isOn ? '' : '  nothing below is enforced', color: MUTED },
   ]
-  const row = (r: LimitRow): Line => [
-    { text: fit(r.label, LIMIT_LABEL_COLUMNS), color: r.isOver ? OVER : TEXT },
-    { text: right(r.spent, 8) + ' / ', color: r.isOver ? OVER : MUTED },
-    { text: fit(r.limit, LIMIT_COLUMNS), color: MUTED },
+  const role = (label: string, r: RoleRow, isPaused: boolean): Line => [
+    { text: fit(label, LIMIT_LABEL_COLUMNS), color: r.isOver ? OVER : TEXT },
+    { text: fit(r.role === 'main' ? 'chat' : 'helpers', ROLE_COLUMNS), color: MUTED },
+    { text: right(r.spent, 8) + (r.limit === null ? '' : ' / '), color: r.isOver ? OVER : MUTED },
+    { text: fit(r.limit ?? '  no limit', LIMIT_COLUMNS), color: MUTED },
     ...r.raises.flatMap((b, i) => [...(i > 0 ? [{ text: ' ' }] : []), ...pill(b.label, { raise: b.raise })]),
+    ...(isPaused && r.role === 'main' ? [{ text: ' paused', color: OVER, bold: true }] : []),
   ]
   const gates: Line[] = [[{ text: fit('Allowed', 15), color: TEXT, bold: true }]]
   for (const g of props.gates) {
@@ -234,15 +237,35 @@ function limitsLines(props: LimitsProps): Line[] {
   return [
     on,
     [{ text: '' }],
-    heading('Quota groups, $ at API prices this session'),
-    ...props.groups.map(row),
+    heading('Pools, $ at API prices this session'),
+    ...props.pools.flatMap(p => p.roles.map((r, i) => role(i === 0 ? p.label : '', r, p.isPaused))),
     [{ text: '' }],
     ...gates,
     [{ text: '' }],
-    muted("A group's models share its quota, each weighed by its price;"),
-    muted("reviewers and Claude's agents count alike. Groups, prices and"),
-    muted('limits: models.json; raises and switches hold for this session.'),
+    muted("Helpers (reviewers, Claude's agents) past their limit are refused;"),
+    muted('the chat past its limit is paused but for turns you start.'),
+    muted('Pools, prices, limits: providers.json; raises and switches hold'),
+    muted('for this session.'),
   ]
+}
+
+const QUOTA_POOL_COLUMNS = 16
+const QUOTA_WINDOW_COLUMNS = 8
+
+/** Each provider with a quota source: what is left of each window of each pool, and when it resets. */
+function quotaLines(props: QuotaProps): Line[] {
+  if (props.blocks.length === 0) return [muted('No provider reads or meters a quota.')]
+  return props.blocks.flatMap((b, i) => [
+    ...(i > 0 ? [[{ text: '' }]] : []),
+    [{ text: b.title, color: b.color, bold: true }],
+    ...b.rows.map((r): Line => [
+      { text: '  ' + fit(r.pool, QUOTA_POOL_COLUMNS), color: TEXT },
+      { text: fit(r.window, QUOTA_WINDOW_COLUMNS), color: MUTED },
+      { text: right(r.left, 5) + ' left', color: r.isLow ? OVER : TEXT },
+      { text: `  resets ${r.resets}`, color: MUTED },
+    ]),
+    ...b.notes.map(n => muted('  ' + n)),
+  ])
 }
 
 export function overviewLines(props: OverviewProps): Line[] {
@@ -253,7 +276,9 @@ export function overviewLines(props: OverviewProps): Line[] {
         ? usageLines(props.usage, props.opened)
         : props.tab === 'log'
           ? logLines(props.log, props.rows, props.opened)
-          : limitsLines(props.limits)
+          : props.tab === 'quota'
+            ? quotaLines(props.quota)
+            : limitsLines(props.limits)
   return [...tabLines(props), ...body].map(full)
 }
 

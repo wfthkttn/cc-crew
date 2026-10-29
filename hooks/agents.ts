@@ -1,7 +1,6 @@
 import type { AgentInfo, AgentStatus } from 'claude-code'
 
-import { sum } from './limits.ts'
-import type { Tokens } from './usage.ts'
+import { sum, type Tokens } from './usage.ts'
 
 /** One agent Claude started in this session: an Agent tool subagent, or one agent of a workflow run. */
 export type ClaudeAgent = {
@@ -12,6 +11,8 @@ export type ClaudeAgent = {
   workflow?: string
   /** What it runs on, as its spawn resolved it. */
   model?: string
+  /** `<provider>/<model>` as cc-providers keys it, under the provider the session runs on. */
+  key: string
   startedAt: number
   /** When its last turn ended. */
   endedAt?: number
@@ -19,9 +20,16 @@ export type ClaudeAgent = {
   status: AgentStatus
   /** Every turn it finished, summed. */
   tokens?: Tokens
+  /** What its turns cost in $ at API prices, as cc-providers priced each. */
+  usd: number
+  /** Some of it was priced at the dearest it could be. */
+  isEstimate: boolean
 }
 
 export const LIVE: readonly AgentStatus[] = ['pending', 'running', 'waiting']
+
+/** A finished turn: what it spent and what that cost. */
+export type Turn = { isAnswer: boolean; tokens?: Tokens; usd: number; isEstimate: boolean; at: number }
 
 /** Claude's own agents of this load, newest last; crew's reviewers are not among them. */
 export class ClaudeAgents {
@@ -37,17 +45,24 @@ export class ClaudeAgents {
     this.refresh(listed)
   }
 
-  started(a: Omit<ClaudeAgent, 'status'>): void {
-    this.byId.set(a.id, { ...a, status: 'running' })
+  started(a: Omit<ClaudeAgent, 'status' | 'usd' | 'isEstimate'>): void {
+    this.byId.set(a.id, { ...a, status: 'running', usd: 0, isEstimate: false })
+  }
+
+  /** The agent's key, for pricing its turn; undefined for an agent this session did not see start. */
+  keyOf(id: string): string | undefined {
+    return this.byId.get(id)?.key
   }
 
   /** A turn of a known agent ended; false for an agent this session did not see start. */
-  finished(id: string, isAnswer: boolean, tokens: Tokens | undefined, at: number): boolean {
+  finished(id: string, turn: Turn): boolean {
     const a = this.byId.get(id)
     if (a === undefined) return false
-    a.status = isAnswer ? 'completed' : 'failed'
-    a.endedAt = at
-    if (tokens !== undefined) a.tokens = a.tokens === undefined ? tokens : sum([a.tokens, tokens])
+    a.status = turn.isAnswer ? 'completed' : 'failed'
+    a.endedAt = turn.at
+    a.usd += turn.usd
+    a.isEstimate ||= turn.isEstimate
+    if (turn.tokens !== undefined) a.tokens = a.tokens === undefined ? turn.tokens : sum([a.tokens, turn.tokens])
     return true
   }
 
