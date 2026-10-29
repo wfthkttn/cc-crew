@@ -127,6 +127,7 @@ const TICK_MS = 1000
 /** How often the quota, the providers and their pools are read again: providers reads a provider's quota every 5 minutes. */
 const QUOTA_MS = 30_000
 
+/** The session crew draws and records, moved by `follow`. */
 let sessionId = ''
 /** Made at the first session start of this load: reviews running across a `/clear` still end into it. */
 let reviews: Reviews | null = null
@@ -147,8 +148,12 @@ let quotaError: string | null = null
 let sessionProvider = ''
 /** Set at session start and read again every tick. */
 let limits: ProvidersLimits | null = null
-/** The Telegram ask about a paused pool, open until answered or the pause ends. */
-let openAsk: { key: string; pool: string } | null = null
+type Ask = { session: string; key: string; pool: string }
+/** The Telegram ask about a paused pool, open until answered, the pause ends or the session moves on. */
+let openAsk: Ask | null = null
+/** Puts up one ask at a time, so the ask a newer one replaces is always cancelled. */
+let asking: Promise<unknown> = Promise.resolve()
+let following: Promise<void> = Promise.resolve()
 
 function liveReviews(): Reviews {
   if (reviews === null) throw new Error('crew: reviews are used before session start')
@@ -237,9 +242,41 @@ async function syncBadge($: EngineInterface): Promise<void> {
   await $.sidebar.badge({ id: TAB_ID, ...next })
 }
 
+/** Reads the session's record, agents, reviews and limits; they replace what crew held only once all are read. */
+async function enter($: EngineInterface, id: string): Promise<void> {
+  const entered = await loadRecord(ioOf($), recordPath(cacheDir, id))
+  const listed = await $.agent.list()
+  await liveReviews().restore(ioOf($), agentsOf($), id)
+  const read = await $.providers.limits({ session: id })
+  claudeAgents.restore(entered.agents, listed)
+  record = entered
+  limits = read
+  sessionId = id
+  await syncBadge($)
+}
+
+/**
+ * Moves crew onto the session the engine runs now: a `/clear` or a resume goes on under a new id without a session
+ * start. A failed entry rejects its caller, and the next call tries again.
+ */
+function follow($: EngineInterface): Promise<void> {
+  const step = following.then(async () => {
+    const id = await $.session.id()
+    if (id !== sessionId) await enter($, id)
+  })
+  following = step.catch(() => undefined)
+  return step
+}
+
 async function tick($: EngineInterface): Promise<void> {
+  await follow($)
   claudeAgents.refresh(await $.agent.list())
   limits = await $.providers.limits({ session: sessionId })
+  if (openAsk !== null && openAsk.session !== sessionId) {
+    const ask = openAsk
+    openAsk = null
+    await $.courier.cancel({ key: ask.key, reason: 'That conversation ended: a /clear or a resume started another.' })
+  }
   if (openAsk !== null && !limits.pools.some(p => p.pool === openAsk?.pool && p.pausedAt !== null)) {
     const ask = openAsk
     openAsk = null
@@ -366,6 +403,7 @@ function alertOf($: EngineInterface): Alert {
 }
 
 async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
+  await follow($)
   const description = str(f, 'description')
   const brief = str(f, 'prompt')
   const specs = reviewersOf(f)
@@ -400,6 +438,7 @@ async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): 
 }
 
 async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
+  await follow($)
   const key = str(f, 'reviewer')
   const all = liveReviews()
   const agents = agentsOf($)
@@ -415,6 +454,7 @@ async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal
 }
 
 async function status($: EngineInterface, f: Fields): Promise<string> {
+  await follow($)
   const all = liveReviews()
   if (typeof f.run === 'string') return all.summary(await all.load(ioOf($), agentsOf($), f.run))
   const lines = all.sessionReviews(sessionId).map(r => all.summary(r).split('\n')[0]!)
@@ -444,17 +484,24 @@ type Asked = { picked: string } | { picked: undefined; why: 'not enabled' | 'clo
 const isCourierMissing = (err: unknown) => err instanceof TypeError && err.message.includes('$.courier')
 
 /** Shows `text` with one button per label in the session's thread and waits for a press. A failure other than a missing courier rejects. */
-async function askChoice($: EngineInterface, key: string, pool: string, text: string, labels: string[]): Promise<Asked> {
+async function askChoice($: EngineInterface, ask: Ask, text: string, labels: string[]): Promise<Asked> {
+  const key = ask.key
   try {
-    if (openAsk !== null) await $.courier.cancel({ key: openAsk.key, reason: 'Replaced by a newer ask.' })
-    openAsk = null
-    await $.courier.ask({ key, thread: `cc:${sessionId}`, questions: [{ id: 'action', text, options: labels.map(label => ({ label })) }] })
-    let shown = await $.courier.deliver({ key, group: 'attention' })
+    const put = asking.then(async () => {
+      if (openAsk !== null) await $.courier.cancel({ key: openAsk.key, reason: 'Replaced by a newer ask.' })
+      openAsk = null
+      await $.courier.ask({ key, thread: `cc:${ask.session}`, questions: [{ id: 'action', text, options: labels.map(label => ({ label })) }] })
+      const delivered = await $.courier.deliver({ key, group: 'attention' })
+      if (delivered.state !== 'held') openAsk = ask
+      return delivered
+    })
+    // its failure is this caller's; the next ask still goes up
+    asking = put.catch(() => undefined)
+    let shown = await put
     if (shown.state === 'held') {
       await $.courier.cancel({ key, reason: 'The thread is not enabled.' })
       return { picked: undefined, why: 'not enabled' }
     }
-    openAsk = { key, pool }
     while (shown.state === 'delivered' && openAsk?.key === key) shown = await $.courier.wait({ key, known: 'delivered' })
     if (shown.state !== 'answered' || openAsk?.key !== key) return { picked: undefined, why: 'closed' }
     openAsk = null
@@ -473,10 +520,10 @@ const KEEP_PAUSED = 'Keep paused'
  * Asks the person on Telegram whether to let the paused conversation go on, and raises its limit by what they press;
  * asks again while a raise leaves it paused. Without Telegram the terminal and the thread get a notice instead.
  */
-async function askRaise($: EngineInterface, reached: Pick<ProvidersLimitReached, 'pool' | 'name' | 'spentUsd' | 'limitUsd' | 'at'>): Promise<void> {
+async function askRaise($: EngineInterface, session: string, reached: Pick<ProvidersLimitReached, 'pool' | 'name' | 'spentUsd' | 'limitUsd' | 'at'>): Promise<void> {
   const text = `Paused: this conversation spent ${usd(reached.spentUsd)} in the ${reached.name} pool at API prices, past its limit of ${usd(reached.limitUsd)}. It goes on in turns you start; a raise lets it go on by itself.`
   const labels = [...RAISES_USD.map(n => `+$${n}`), KEEP_PAUSED]
-  const asked = await askChoice($, `crew-limit:${sessionId}:${reached.pool}:${reached.at}`, reached.pool, text, labels)
+  const asked = await askChoice($, { session, key: `crew-limit:${session}:${reached.pool}:${reached.at}`, pool: reached.pool }, text, labels)
   if (asked.picked === undefined) {
     if (asked.why === 'closed') return
     await $.conversation.tell({ text: `crew: ${text}`, group: 'attention' })
@@ -484,12 +531,17 @@ async function askRaise($: EngineInterface, reached: Pick<ProvidersLimitReached,
     return
   }
   if (asked.picked === KEEP_PAUSED) return
-  const raised = await $.providers.raise({ session: sessionId, pool: reached.pool, role: 'main', usd: Number(asked.picked.slice(2)) })
-  limits = raised
-  await syncBadge($)
+  // a raise in the tab can land before the press does
+  const now = await $.providers.limits({ session })
+  if (!now.pools.some(p => p.pool === reached.pool && p.pausedAt !== null)) return
+  const raised = await $.providers.raise({ session, pool: reached.pool, role: 'main', usd: Number(asked.picked.slice(2)) })
+  if (session === sessionId) {
+    limits = raised
+    await syncBadge($)
+  }
   const pool = raised.pools.find(p => p.pool === reached.pool)
   if (pool?.pausedAt === null || pool === undefined || pool.main.limitUsd === null) return
-  await askRaise($, { pool: reached.pool, name: pool.name, spentUsd: pool.main.spentUsd, limitUsd: pool.main.limitUsd, at: await $.clock.now() })
+  await askRaise($, session, { pool: reached.pool, name: pool.name, spentUsd: pool.main.spentUsd, limitUsd: pool.main.limitUsd, at: await $.clock.now() })
 }
 
 export const register: Register = (on, options) => {
@@ -503,7 +555,6 @@ export const register: Register = (on, options) => {
     const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
     system = systemPrompt(rules)
     reviews ??= makeReviews(cacheDir)
-    sessionId = await $.session.id()
     providersInfo = await $.providers.list()
     groups = (await $.providers.catalog()).groups
     sessionProvider = (await $.providers.sessionProvider()).provider
@@ -518,12 +569,8 @@ export const register: Register = (on, options) => {
       description: "This session's crew reviews and the quota of each reviewer's provider.",
       inputSchema: STATUS_SCHEMA,
     })
-    record = await loadRecord(ioOf($), recordPath(cacheDir, sessionId))
-    claudeAgents.restore(record.agents, await $.agent.list())
-    await reviews.restore(ioOf($), agentsOf($), sessionId)
-    limits = await $.providers.limits({ session: sessionId })
     await $.sidebar.register(TOOL)
-    await syncBadge($)
+    await follow($)
     ticker?.cancel()
     ticker = $.clock.every(TICK_MS, () => void tick($))
     quotaTicker?.cancel()
@@ -534,6 +581,7 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     const spawned = await next(e)
+    await follow($)
     if (spawned.deny === undefined && spawned.agentId !== undefined) {
       const model = spawned.model ?? e.model ?? e.parentModel
       claudeAgents.started({
@@ -562,12 +610,13 @@ export const register: Register = (on, options) => {
 
   on('providers.limitReached', async ($, e, next) => {
     const reached = await next(e)
+    await follow($)
     if (e.session === sessionId) {
       limits = await $.providers.limits({ session: sessionId })
       await syncBadge($)
       // a noun call is cut at 10 s; the ask waits on the person
       $.clock.after(0, () =>
-        void askRaise($, e).catch(async (err: unknown) => {
+        void askRaise($, e.session, e).catch(async (err: unknown) => {
           const why = `crew: asking about the pause in ${e.name} failed: ${err instanceof Error ? err.message : String(err)}`
           $.ui.log(why, { to: 'debug' })
           await $.ui.toast(why)
@@ -587,6 +636,7 @@ export const register: Register = (on, options) => {
       stop?: { run?: unknown; key?: unknown }
       open?: { run?: unknown; agent?: unknown; group?: unknown; model?: unknown }
     }
+    await follow($)
     if (data.switchLimits === true) limits = await $.providers.switchLimits({ session: sessionId, isOff: liveLimits().isOn })
     if (data.tab === 'running' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits' || data.tab === 'quota') view = { tab: data.tab, page: 0 }
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
@@ -663,6 +713,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__cc-crew__review_status' }, ($, e) => answer(status($, fields(e))))
 
   on('turn.complete', async ($, e, next) => {
+    await follow($)
     if (e.agentId === undefined) {
       record.turns += 1
       // the conversation writes the 1-hour cache, and a turn's usage doesn't split its writes by lifetime
