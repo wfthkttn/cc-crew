@@ -1,6 +1,6 @@
 import type { ProvidersTokens } from 'cc-providers'
 
-/** Tokens one reviewer or agent spent, as cc-providers counts them for every provider. */
+/** Tokens one agent spent, as cc-providers counts them for every provider. */
 export type Tokens = ProvidersTokens
 
 const num = (o: Record<string, unknown>, key: string): number => (typeof o[key] === 'number' ? (o[key] as number) : 0)

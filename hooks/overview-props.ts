@@ -1,11 +1,11 @@
-export type Tab = 'running' | 'usage' | 'limits' | 'quota' | 'log'
+export type Tab = 'running' | 'jobs' | 'usage' | 'limits' | 'quota' | 'log'
 
 export type Role = 'main' | 'helpers'
 
 /** A raise press: `usd` more for one role in one pool, by the pool's id. */
 export type Raise = { pool: string; role: Role; usd: number }
 
-/** What the pop-out shows: a review, an agent, a pool (by id) or a model (by its `<provider>/<model>` key). */
+/** What the pop-out shows: a job, an agent, a pool (by id) or a model (by its `<provider>/<model>` key). */
 export type Target = { run: string } | { agent: string } | { group: string } | { model: string }
 
 /** What a press on the overview asks for. */
@@ -17,8 +17,11 @@ export type OverviewAction =
   | { raise: Raise }
   | { toggle: string }
   | { switchLimits: true }
+  | { tick: { job: string; model: string } }
+  | { poke: { job: string; model: string; by: number } }
 
-export type ReviewerRow = {
+export type MemberRow = {
+  /** The agent's letter. */
   key: string
   provider: string
   /** `sol · medium`; empty when neither is set. */
@@ -28,16 +31,19 @@ export type ReviewerRow = {
   isRunning: boolean
   /** `109k new · 4k out` once it reported usage. */
   tokens: string | null
+  /** What liveness last read of it, while it runs. */
+  reading: string | null
+  isStalled: boolean
 }
 
-export type RunRow = { kind: 'review'; id: string; description: string; elapsed: string; reviewers: ReviewerRow[] }
+export type RunRow = { kind: 'job'; id: string; description: string; elapsed: string; members: MemberRow[] }
 
 export type AgentRow = { kind: 'agent'; id: string; type: string; description: string; status: string; elapsed: string; tokens: string | null }
 
 /** Token counts as a table's columns show them, `109k`; empty where nothing was reported. */
 export type TokenCells = { new: string; cached: string; out: string }
 
-/** The first tab: the reviews and agents running now, newest first. */
+/** The first tab: the jobs and agents running now, newest first. */
 export type RunningProps = { live: (RunRow | AgentRow)[] }
 
 /**
@@ -48,7 +54,7 @@ export type UsageRow = TokenCells & { label: string; count: string; usd: string;
 
 export type UsageProps = { rows: UsageRow[]; isGuessing: boolean }
 
-/** One finished review or agent, newest first; a press opens its details. */
+/** One finished job or agent, newest first; a press opens its details. */
 export type LogRow = TokenCells & { time: string; what: string; status: string; took: string; open: Target }
 
 export type LogProps = { rows: LogRow[]; page: number }
@@ -70,15 +76,21 @@ export type QuotaBlock = { title: string; color: string; rows: QuotaRow[]; notes
 
 export type QuotaProps = { blocks: QuotaBlock[] }
 
+/** A job's models: `isTicked` where a call runs it in this session, and after how many minutes an idle conversation hears. */
+export type JobRow = { job: string; models: { model: string; isTicked: boolean; pokeMin: number }[] }
+
+export type JobsProps = { jobs: JobRow[] }
+
 export type OverviewProps = {
   tab: Tab
-  /** What the tab row counts: reviews and agents running, entries logged. */
+  /** What the tab row counts: jobs and agents running, entries logged. */
   counts: { running: number; log: number }
   /** The rows the drawer has for the view, the tab row included. */
   rows: number
-  /** The review, agent, pool or model the pop-out shows, so its line reads as open. */
+  /** The job, agent, pool or model the pop-out shows, so its line reads as open. */
   opened: Target | null
   running: RunningProps
+  jobs: JobsProps
   usage: UsageProps
   log: LogProps
   limits: LimitsProps

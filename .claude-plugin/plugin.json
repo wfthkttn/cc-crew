@@ -1,67 +1,16 @@
 {
   "name": "cc-crew",
-  "version": "0.4.0",
-  "description": "Reviews by other providers' models, run headless through cc-agents, and a sidebar tab over the session's agents, spend, limits and quota",
+  "version": "0.5.0",
+  "description": "Reviews, research and other jobs run by other providers' models behind one tool each, their reports kept and read through crew, and a sidebar tab over the session's agents, spend, limits and quota",
   "author": { "name": "alex" },
   "dependencies": ["cc-conversation", "cc-sidebar", "cc-providers", "cc-agents", "cc-bus"],
   "userConfig": {
-    "reviewers": {
-      "type": "string",
-      "multiple": true,
-      "title": "Default reviewers",
-      "description": "Providers a review runs when the call names none: any provider in providers.json with a cli: endpoint, such as codex, antigravity, claude or zai",
-      "default": ["codex", "antigravity", "claude"]
-    },
-    "codex_model": {
-      "type": "string",
-      "title": "Codex model",
-      "description": "Model a Codex reviewer runs when the call names none; empty for Codex's default",
-      "default": ""
-    },
-    "codex_effort": {
-      "type": "string",
-      "title": "Codex reasoning effort",
-      "description": "Reasoning effort a Codex reviewer runs at when the call names none; empty for the model's default",
-      "default": "medium"
-    },
-    "agy_model": {
-      "type": "string",
-      "title": "Antigravity model",
-      "description": "Model id an Antigravity reviewer runs when the call names none; empty for Antigravity's default",
-      "default": ""
-    },
-    "agy_effort": {
-      "type": "string",
-      "title": "Antigravity effort",
-      "description": "Effort an Antigravity reviewer runs at when the call names none; empty for the model's default",
-      "default": ""
-    },
-    "claude_model": {
-      "type": "string",
-      "title": "Claude reviewer model",
-      "description": "sonnet, opus or haiku: the Claude reviewer's model when the call names none",
-      "default": "opus"
-    },
-    "claude_effort": {
-      "type": "string",
-      "title": "Claude reviewer effort",
-      "description": "low, medium, high, xhigh or max for every Claude reviewer; empty for Claude Code's default",
-      "default": "medium"
-    },
     "reviewer_rules": {
       "type": "string",
       "multiple": true,
-      "title": "Reviewer rule files",
-      "description": "Absolute paths of Markdown files added to every reviewer's instructions",
+      "title": "Agent rule files",
+      "description": "Absolute paths of Markdown files added to every crew agent's instructions",
       "default": []
-    },
-    "timeout_s": {
-      "type": "number",
-      "title": "Reviewer timeout (s)",
-      "description": "How long one reviewer may run before it is stopped",
-      "default": 1800,
-      "min": 60,
-      "max": 7200
     }
   }
 }

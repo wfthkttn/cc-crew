@@ -1,8 +1,8 @@
 import type { FsEntry, ProcessRunResult } from 'claude-code'
-import type { AgentsJob, AgentsOutcome, AgentsRun } from 'cc-agents'
+import type { AgentsActivity, AgentsJob, AgentsOutcome, AgentsRun } from 'cc-agents'
 
 import type { Io } from '../hooks/io.ts'
-import type { AgentsPort, ProvidersPort } from '../hooks/reviews.ts'
+import type { AgentsPort, ProvidersPort } from '../hooks/jobs.ts'
 
 export type Fake = Io & { files: Map<string, string>; dirs: Set<string>; ran: string[][]; advance: (ms: number) => void }
 
@@ -52,23 +52,17 @@ export function fakeIo(o: Options = {}): Fake {
   return fake
 }
 
-export const FINDINGS = {
-  summary: 'One bug.',
-  findings: [
+export const ANSWER = {
+  scopes: [
     {
-      title: 'Off by one',
-      priority: 1,
-      confidence: 0.8,
-      file: 'main.ts',
-      line_start: 3,
-      line_end: 4,
-      scenario: 'n = 0',
-      body: 'Loop skips the last item.',
-      pre_existing: false,
+      scope: 'Parser',
+      report: 'Read the loop; the rest holds.',
+      findings: [{ title: 'Off by one', priority: 1, confidence: 0.8, body: 'Loop skips the last item.', evidence: 'n = 0 returns nothing.', references: ['main.ts:3'] }],
+      references: ['README.md'],
     },
+    { scope: 'Limits', report: 'Sound.', findings: [], references: [] },
   ],
-  checked: ['main.ts'],
-  not_read: [],
+  not_read: ['vendor/'],
 }
 
 export const ok = (stdout = '', stderr = '', exitCode = 0): ProcessRunResult => ({
@@ -79,7 +73,7 @@ export const ok = (stdout = '', stderr = '', exitCode = 0): ProcessRunResult => 
   isStderrTruncated: false,
 })
 
-type Started = { session: string; provider: string; job: AgentsJob; group: string; label: string }
+type Started = { session: string; provider: string; kind: string; job: Omit<AgentsJob, 'cacheTtl'>; group: string; label: string }
 
 /** `$.agents` as crew calls it: each start is kept running until the test ends it; `refuse` answers a provider's start ended at its limit. */
 export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
@@ -87,6 +81,7 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
   const started: Started[] = []
   const followed: { session: string; id: string; message: string }[] = []
   const stopped: string[] = []
+  const activities = new Map<string, AgentsActivity | null>()
   const port: AgentsPort = {
     async start(input) {
       started.push(input)
@@ -99,6 +94,7 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
         label: input.label,
         provider: input.provider,
         key: `${input.provider}/${input.job.model ?? 'default'}`,
+        kind: input.kind,
         job: input.job,
         status: refused === undefined ? 'running' : 'limit',
         costUsd: 0,
@@ -121,6 +117,9 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
     async stop({ id }) {
       stopped.push(id)
       return { isStopping: true }
+    },
+    async activity({ id }) {
+      return activities.get(id) ?? null
     },
     async get({ id }) {
       const run = runs.get(id)
@@ -146,15 +145,14 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
     runs.set(id, run)
     return run
   }
-  return { port, runs, started, followed, stopped, end }
+  return { port, runs, started, followed, stopped, activities, end }
 }
 
-/** `$.providers` as crew calls it before a review: the project as the root, refusals by provider, secrets by name. */
+/** `$.providers` as crew calls it once it picked: the project as the root, refusals by provider, secrets by name. */
 export function fakeProviders(o: { refuse?: Record<string, string>; roots?: { roots: string[]; files: string[] } } = {}): ProvidersPort & { asked: string[] } {
   const asked: string[] = []
   return {
     asked,
-    modelKey: async ({ provider, model }) => `${provider}/${model ?? 'default'}`,
     refusal: async ({ key }) => {
       asked.push(key)
       return { refusal: o.refuse?.[key.slice(0, key.indexOf('/'))] ?? null }

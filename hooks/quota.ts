@@ -2,7 +2,7 @@ import type { SidebarGaugeColumn } from 'cc-sidebar'
 import type { ProvidersInfo, ProvidersQuotaSlot, ProvidersWindowReading } from 'cc-providers'
 
 import type { QuotaBlock, QuotaProps } from './overview-props.ts'
-import { clockText } from './reviews.ts'
+import { clockText } from './jobs.ts'
 
 /** A provider's quota as `$.providers.quota` answered it last. */
 export type QuotaView = { info: ProvidersInfo; slots: ProvidersQuotaSlot[] }

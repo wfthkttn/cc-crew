@@ -3,15 +3,16 @@ import type { AgentsRun } from 'cc-agents'
 import type { ProvidersGroup, ProvidersInfo, ProvidersLimits, ProvidersPoolLimit, ProvidersQuotaSlot } from 'cc-providers'
 
 import { type ClaudeAgent, ClaudeAgents } from '../hooks/agents.ts'
+import type { JobSpec } from '../hooks/config.ts'
 import { pressAt, wrap } from '../hooks/detail.ts'
 import { detailProps } from '../hooks/register.ts'
 import { OVERVIEW_COLUMNS, actionAt, logPageSize, overviewLines } from '../hooks/overview.ts'
 import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { gaugeColumns, type QuotaView } from '../hooks/quota.ts'
 import { emptyRecord } from '../hooks/record.ts'
-import type { ReviewView } from '../hooks/reviews.ts'
+import type { JobView } from '../hooks/jobs.ts'
 import { claudeTokens, shortCount } from '../hooks/usage.ts'
-import { type ViewInput, agentDetail, badgeOf, itemsOf, overviewProps, runDetail, usageDetail } from '../hooks/views.ts'
+import { type ViewInput, agentDetail, badgeOf, itemsOf, jobDetail, overviewProps, usageDetail } from '../hooks/views.ts'
 
 const AT = new Date(2026, 9, 23, 20, 7).getTime()
 const TOKENS = { in: 900_000, cached: 600_000, out: 40_000 }
@@ -22,6 +23,7 @@ function runOf(id: string, provider: string, key: string, status: AgentsRun['sta
     session: 's1',
     provider,
     key: key as AgentsRun['key'],
+    kind: 'oneshot',
     job: { dir: '/c', read: 'project', project: '/p', system: '', task: '', web: false, helpers: false, timeoutMs: 1 },
     status,
     costUsd,
@@ -32,14 +34,16 @@ function runOf(id: string, provider: string, key: string, status: AgentsRun['sta
   }
 }
 
-function review(id: string, statuses: [AgentsRun['status'], AgentsRun['status']]): ReviewView {
+const member = (label: string, serves: string, provider: string, model: string) => ({ label, serves, provider, model, key: `${provider}/${model}`, effort: 'medium', web: false, helpers: false, timeoutMs: 1, pokeMs: 1, stallMs: 1 })
+
+function review(id: string, statuses: [AgentsRun['status'], AgentsRun['status']]): JobView {
   const codex = runOf(`${id}-a`, 'codex', 'codex/gpt-6.1-sol', statuses[0], statuses[0] === 'running' ? 0 : 0.38)
   const claude = runOf(`${id}-b`, 'claude', 'claude/opus', statuses[1], statuses[1] === 'running' ? 0 : 5.6)
   return {
-    review: { id, description: `review ${id}`, createdAt: AT, session: 's1', reportDir: `/p/.claude/work/reviews/${id}`, roots: ['/p'], web: false, helpers: false, reviewers: [] },
-    reviewers: [
-      { entry: { key: 'codex-default', provider: 'codex', effort: 'medium', agent: codex.id, findings: 1 }, run: codex, status: codex.status },
-      { entry: { key: 'claude-opus', provider: 'claude', model: 'opus', effort: 'medium', agent: claude.id, findings: 1 }, run: claude, status: claude.status },
+    job: { id, job: 'review', title: 'the parser', createdAt: AT, session: 's1', dir: `/c/${id}`, roots: ['/p'], agents: [], skipped: [{ serves: 'zhipu/glm-5.3', why: 'closed' }], isAcked: false },
+    agents: [
+      { entry: { ...member('A', 'openai/gpt-6.1-sol', 'codex', 'gpt-6.1-sol'), agent: codex.id, findings: 1 }, run: codex, status: codex.status, ...(codex.status === 'running' ? { reading: { text: 'waiting on WebFetch https://x for 12m', isStalled: true, mark: 'm' } } : {}) },
+      { entry: { ...member('B', 'anthropic/claude-opus-5-5', 'claude', 'opus'), agent: claude.id, findings: 1 }, run: claude, status: claude.status },
     ],
   }
 }
@@ -106,7 +110,10 @@ const QUOTA: QuotaView[] = [
   { info: info('zai', 'Z.ai', [['zai', 'Z.ai GLM']], { kind: 'none' }), slots: [{ pools: ['zai'], source: 'none', reading: null, error: 'Z.ai has no quota reader for Z.ai GLM', triedAt: null }] },
 ]
 
-const REVIEWS = [review('r1', ['running', 'ok']), review('r0', ['ok', 'stopped'])]
+const JOBS = [review('r1', ['running', 'ok']), review('r0', ['ok', 'stopped'])]
+const CREW: Record<string, JobSpec> = {
+  review: { description: 'd', prompt: '/p.md', kind: 'oneshot', web: false, helpers: false, paths: 'required', diff: true, timeoutMin: 60, pokeMin: 20, stallMin: 10, models: { 'v/fast': {}, 'v/deep': {}, 'anthropic/claude-sonnet-5-5': { pokeMin: 40 } }, default: ['v/fast'], bySessionModel: { 'claude/opus': ['v/deep'] } },
+}
 const CHAT = { in: 1_200_000, cached: 1_000_000, out: 30_000 }
 
 function viewOf(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = null): ViewInput {
@@ -117,12 +124,14 @@ function viewOf(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] =
     now: AT + 252_000,
     opened,
     groups: GROUPS,
-    reviews: REVIEWS,
+    jobs: JOBS,
     agents: AGENTS,
-    record: { ...emptyRecord(), turns: 7, main: CHAT },
+    record: { ...emptyRecord(), turns: 7, main: CHAT, jobs: { review: { pokeMin: { 'v/fast': 35 } } } },
     limits: LIMITS,
     gates: GATES,
     quota: QUOTA,
+    crew: CREW,
+    sessionKey: 'claude/opus',
   }
 }
 
@@ -138,25 +147,38 @@ test("a Claude turn's usage reads as tokens in, cache reads and writes included,
 })
 
 test('every view fits the drawer, under a tab row that counts what runs and what is logged, Log last', () => {
-  for (const tab of ['running', 'usage', 'log', 'limits', 'quota'] as const) {
+  for (const tab of ['running', 'jobs', 'usage', 'log', 'limits', 'quota'] as const) {
     const lines = text(props(tab))
     expect(lines.map(l => [...l].length)).toEqual(lines.map(() => OVERVIEW_COLUMNS))
-    expect(lines[0]).toStartWith(' Running 2 │ Usage │ Limits │ Quota │ Log 2 ')
+    expect(lines[0]).toStartWith(' Running 2 │ Jobs │ Usage │ Limits │ Quota │ Log 2 ')
   }
 })
 
-test('Running: reviews and agents running now in one list, newest first, a review with its buttons and reviewers', () => {
+test('Running: jobs and agents running now in one list, newest first, a job with its buttons, its agents, and what a running one is on', () => {
   const p = props('running')
   const lines = text(p)
   expect(lines[2]).toMatch(/^ Explore: find the parser +3:12 running/)
-  expect(lines[3]).toContain('review: review r1')
+  expect(lines[3]).toContain('r1: the parser')
   expect(lines[3]).toContain('▐⧉ Details▌ ▐■ Stop▌')
-  expect(lines[4]).toMatch(/codex +medium +running +4:12 ▐■ Stop▌/)
-  expect(lines[5]).toContain('300k new · 40k out')
-  expect(lines).toHaveLength(6)
+  expect(lines[4]).toMatch(/codex +gpt-6.1-sol · … +running +4:12 ▐■ Stop▌/)
+  expect(lines[5]).toContain('└ waiting on WebFetch https://x for 12m')
+  expect(lines[6]).toContain('300k new · 40k out')
+  expect(lines).toHaveLength(7)
   expect(actionAt(p, 5, 2)).toEqual({ open: { agent: 'a1' } })
   expect(actionAt(p, lines[3]!.indexOf('Details'), 3)).toEqual({ open: { run: 'r1' } })
-  expect(actionAt(p, lines[4]!.indexOf('Stop'), 4)).toEqual({ stop: { run: 'r1', key: 'codex-default' } })
+  expect(actionAt(p, lines[4]!.indexOf('Stop'), 4)).toEqual({ stop: { run: 'r1', key: 'A' } })
+})
+
+test("Jobs: each job's models ticked as a call runs them in this session, with the poke set for each and steps for it", () => {
+  const p = props('jobs')
+  const lines = text(p)
+  expect(lines[2]).toStartWith('review')
+  expect(lines[3]).toMatch(/○ v\/fast +▌ +35m ▐-5▌ ▐\+5▌/)
+  expect(lines[4]).toMatch(/● v\/deep +▌ +20m/)
+  expect(lines[5]).toMatch(/○ anthropic\/claude-sonnet-5-5 +▌ +40m/)
+  expect(actionAt(p, 2, 4)).toEqual({ tick: { job: 'review', model: 'v/deep' } })
+  expect(actionAt(p, lines[3]!.indexOf('-5'), 3)).toEqual({ poke: { job: 'review', model: 'v/fast', by: -5 } })
+  expect(actionAt(p, lines[3]!.indexOf('+5'), 3)).toEqual({ poke: { job: 'review', model: 'v/fast', by: 5 } })
 })
 
 test("Usage: this chat as providers metered it, then each pool with its models under it, in $ at API prices; a pool's or model's row opens it", () => {
@@ -172,12 +194,12 @@ test("Usage: this chat as providers metered it, then each pool with its models u
   expect(actionAt(p, 0, 4)).toBe(null)
   expect(actionAt(p, 0, 5)).toEqual({ open: { group: 'claude' } })
   expect(actionAt(p, 0, 6)).toEqual({ open: { model: 'claude/opus' } })
-  const items = itemsOf(GROUPS, REVIEWS, AGENTS)
+  const items = itemsOf(GROUPS, JOBS, AGENTS)
   const detail = usageDetail(GROUPS, items, LIMITS, { model: 'claude/opus' }, AT + 252_000)
   expect(detail).toStartWith('3 runs · $11.44 at API prices\nClaude pool this session: helpers $11.44 of $1.00; chat $4.50 of $20.00\nTokens: 610k new · 1.2M cached · 82k out\n')
   expect(detail).toContain('20:07 workflow: review:bugs\n└ completed, 1:00 · 10k new · 40k cached · 2k out · $0.24')
-  expect(detail).toContain('20:07 review: review r0 (claude-opus)\n└ stopped, 1:18')
-  expect(usageDetail(GROUPS, items, LIMITS, { group: 'claude' }, AT)).toContain('20:07 review: review r1 (claude-opus) · opus')
+  expect(detail).toContain('20:07 r0: the parser (B)\n└ stopped, 1:18')
+  expect(usageDetail(GROUPS, items, LIMITS, { group: 'claude' }, AT)).toContain('20:07 r1: the parser (B) · opus')
 })
 
 test('Usage marks a model priced at its dearest, or that no pool places, as an upper bound', () => {
@@ -187,12 +209,12 @@ test('Usage marks a model priced at its dearest, or that no pool places, as an u
   expect(lines.some(l => l.startsWith('? priced at the dearest it could be'))).toBe(true)
 })
 
-test('Log: one row per finished review or agent, newest first; a press on a row opens it', () => {
+test('Log: one row per finished job or agent, newest first; a press on a row opens it', () => {
   const p = props('log')
   const lines = text(p)
   expect(lines[2]).toMatch(/^time +what +status +took +new +out/)
   expect(lines[4]).toMatch(/^20:07 workflow: review:bugs +completed +1:00 +10k +2k/)
-  expect(lines[5]).toMatch(/^20:07 review: review r0 +1 ok · 1 stop +1:18 +600k +80k/)
+  expect(lines[5]).toMatch(/^20:07 r0: the parser +1 ok · 1 stop +1:18 +600k +80k/)
   expect(lines).toHaveLength(6)
   expect(actionAt(p, 0, 4)).toEqual({ open: { agent: 'a2' } })
   expect(actionAt(p, 40, 5)).toEqual({ open: { run: 'r0' } })
@@ -250,12 +272,14 @@ test("Quota: each provider's pools and windows with what is left and when it res
   expect(gaugeColumns(QUOTA, AT + 16 * 60_000)[0]!.isDim).toBe(true)
 })
 
-test("a review's and an agent's details: when, how it went, what it spent, then the brief or the prompt", () => {
+test("a job's and an agent's details: when, how it went, which model each agent was, what it spent, then the brief or the prompt", () => {
   const r = review('r0', ['ok', 'stopped'])
-  r.reviewers[0]!.run = { ...r.reviewers[0]!.run!, cacheUntil: new Date(2026, 9, 23, 21, 8).getTime() }
-  const shown = runDetail(r, 'Review the parser.')
+  r.agents[0]!.run = { ...r.agents[0]!.run!, cacheUntil: new Date(2026, 9, 23, 21, 8).getTime() }
+  const shown = jobDetail(r, 'Review the parser.')
   expect(shown).toContain('Started 20:07 · took 1:18 · 1 ok · 1 stop')
-  expect(shown).toContain('codex (gpt-6.1-sol · medium): ok, 1:18 · 300k new · 600k cached · 40k out · $0.38 · 1 finding · cache warm until 21:08')
+  expect(shown).toContain('A codex (gpt-6.1-sol · medium): ok, 1:18 · 300k new · 600k cached · 40k out · $0.38 · 1 finding · cache warm until 21:08')
+  expect(shown).toContain('Not run, zhipu/glm-5.3: closed')
+  expect(shown).toContain('Report: /c/r0')
   expect(shown).toMatch(/── Brief ──\nReview the parser\.$/)
   const agent = agentDetail(AGENTS[1]!, 'Find bugs.', AT)
   expect(agent).toContain('general-purpose on claude-opus-5-5 · completed')
@@ -264,12 +288,12 @@ test("a review's and an agent's details: when, how it went, what it spent, then 
   expect(agent).toMatch(/── Prompt ──\nFind bugs\.$/)
 })
 
-test('the tab badge counts reviewers and agents running plus pools at a limit: red while the chat is paused in one, amber at a helpers limit', () => {
+test('the tab badge counts job agents and agents running plus pools at a limit: red while the chat is paused in one, amber at a helpers limit', () => {
   const roomy = { ...LIMITS, pools: LIMITS.pools.map(p => ({ ...p, helpers: role(100, 0) })) }
-  expect(badgeOf(REVIEWS, AGENTS, roomy)).toEqual({ count: 2, level: 'info' })
-  expect(badgeOf(REVIEWS, AGENTS, LIMITS)).toEqual({ count: 3, level: 'attention' })
-  expect(badgeOf(REVIEWS, AGENTS, { ...LIMITS, pools: [{ ...LIMITS.pools[0]!, pausedAt: AT }] })).toEqual({ count: 3, level: 'urgent' })
-  expect(badgeOf(REVIEWS, AGENTS, { ...LIMITS, isOn: false })).toEqual({ count: 2, level: 'info' })
+  expect(badgeOf(JOBS, AGENTS, roomy)).toEqual({ count: 2, level: 'info' })
+  expect(badgeOf(JOBS, AGENTS, LIMITS)).toEqual({ count: 3, level: 'attention' })
+  expect(badgeOf(JOBS, AGENTS, { ...LIMITS, pools: [{ ...LIMITS.pools[0]!, pausedAt: AT }] })).toEqual({ count: 3, level: 'urgent' })
+  expect(badgeOf(JOBS, AGENTS, { ...LIMITS, isOn: false })).toEqual({ count: 2, level: 'info' })
   expect(badgeOf([], [], roomy)).toEqual({ count: 0, level: 'info' })
 })
 

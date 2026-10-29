@@ -31,7 +31,7 @@ export const LIVE: readonly AgentStatus[] = ['pending', 'running', 'waiting']
 /** A finished turn: what it spent and what that cost. */
 export type Turn = { isAnswer: boolean; tokens?: Tokens; usd: number; isEstimate: boolean; at: number }
 
-/** Claude's own agents of this load, newest last; crew's reviewers are not among them. */
+/** Claude's own agents of this load, newest last; crew's job agents are not among them. */
 export class ClaudeAgents {
   private byId = new Map<string, ClaudeAgent>()
 

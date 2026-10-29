@@ -18,8 +18,8 @@ const mods = {
       const noun = (names: string[]) => Object.fromEntries(names.map(n => [n, unused]))
       return {
         ...built,
-        providers: noun(['list', 'catalog', 'sessionProvider', 'limits', 'quota', 'raise', 'switchLimits', 'close', 'limitReached', 'modelKey', 'refusal', 'roots', 'secretPaths', 'cost']),
-        agents: noun(['start', 'followUp', 'stop', 'get', 'list', 'ended']),
+        providers: noun(['list', 'catalog', 'sessionProvider', 'limits', 'quota', 'raise', 'switchLimits', 'close', 'limitReached', 'modelKey', 'pick', 'refusal', 'roots', 'secretPaths', 'cost']),
+        agents: noun(['start', 'kinds', 'followUp', 'stop', 'activity', 'get', 'list', 'ended']),
         sidebar: noun(['register', 'badge', 'gauge', 'selected', 'modal', 'room']),
         bus: noun(['ask', 'tell']),
         conversation: noun(['tell', 'deliver']),
@@ -33,9 +33,36 @@ const mods = {
       await $.bus.tell(JSON.parse(e.args))
       return { text: '' }
     })
+    on('command.run', { command: 'crew-test-ended' }, async ($: any, e: { args: string }) => {
+      await $.agents.ended(JSON.parse(e.args))
+      return { text: '' }
+    })
   },
 }
 const MODS = { plugins: [mods] }
+const JOB = { description: 'Do it.', prompt: 'prompts/job.md', kind: 'oneshot', web: false, helpers: false, timeoutMin: 60, pokeMin: 20, stallMin: 10 }
+const CREW = JSON.stringify({
+  jobs: {
+    review: {
+      ...JOB,
+      paths: 'required',
+      diff: true,
+      models: { 'openai/gpt-6.1-sol': { effort: 'medium' }, 'anthropic/claude-sonnet-5-5': { effort: 'high' }, 'zhipu/glm-5.3': {} },
+      default: ['openai/gpt-6.1-sol'],
+      bySessionModel: { 'claude/opus': ['anthropic/claude-sonnet-5-5', 'openai/gpt-6.1-sol'] },
+    },
+    research: { ...JOB, web: true, paths: 'optional', diff: false, models: { 'openai/gpt-6.1-sol': {} }, default: ['openai/gpt-6.1-sol'] },
+  },
+})
+const CATALOG = [
+  { id: 'codex', name: 'Codex', endpoints: { 'cli:codex': 'codex' }, pools: [], offers: [] },
+  { id: 'claude', name: 'Claude', endpoints: { 'cli:claude': 'claude' }, pools: [], offers: [] },
+  { id: 'vectide-go', name: 'Vectide Go', endpoints: {}, pools: [], offers: [] },
+]
+const PICKS: Record<string, { provider: string; model: string }> = {
+  'openai/gpt-6.1-sol': { provider: 'codex', model: 'gpt-6.1-sol' },
+  'anthropic/claude-sonnet-5-5': { provider: 'claude', model: 'claude-sonnet-5-5' },
+}
 
 type Asked = { state: 'delivered' | 'cancelled'; text: string; cancelled?: string }
 
@@ -50,6 +77,10 @@ function setup(on: any) {
     raises: [] as { session: string; pool: string; usd: number }[],
     asks: new Map<string, Asked>(),
     notices: [] as string[],
+    model: 'claude-opus-5-5',
+    started: [] as { provider: string; kind: string; model: string; effort?: string; read: unknown; web: boolean }[],
+    delivered: [] as string[],
+    activity: null as unknown,
   }
   const limitsOf = (session: string) => ({
     isOn: true,
@@ -69,7 +100,8 @@ function setup(on: any) {
   on('env.get', value(HOME))
   on('tool.register', value(undefined))
   on('fs.exists', ($: unknown, e: { path: string }) => ({ value: world.files.has(e.path) || [...world.files.keys()].some(k => k.startsWith(`${e.path}/`)) }))
-  on('fs.read', ($: unknown, e: { path: string }) => ({ value: world.files.get(e.path) }))
+  // the plugin's own crew.json and prompts, wherever the test runs it from
+  on('fs.read', ($: unknown, e: { path: string }) => ({ value: world.files.get(e.path) ?? (e.path.endsWith('/crew.json') ? CREW : e.path.endsWith('/prompts/job.md') ? 'THE JOB' : undefined) }))
   on('fs.write', ($: unknown, e: { path: string; text: string }) => {
     world.files.set(e.path, e.text)
     return { value: undefined }
@@ -78,8 +110,30 @@ function setup(on: any) {
   on('agent.list', value([]))
   on('agents.list', value([]))
   on('providers.list', value([]))
-  on('providers.catalog', value({ providers: [], groups: [] }))
+  on('providers.catalog', value({ providers: CATALOG, groups: [] }))
   on('providers.sessionProvider', value({ provider: 'claude' }))
+  on('session.model', () => ({ value: world.model }))
+  on('session.root', value('/home/u/p'))
+  on('providers.modelKey', ($: unknown, e: { provider: string; model?: string }) => ({ value: e.provider === 'claude' && e.model?.includes('opus') === true ? 'claude/opus' : `${e.provider}/${e.model}` }))
+  on('providers.refusal', value({ refusal: null }))
+  on('providers.pick', ($: unknown, e: { serves: string }) => {
+    const best = PICKS[e.serves]
+    if (best === undefined) return { value: { ranked: [], dropped: [{ key: `zai/${e.serves}`, why: 'its pool Z has no quota left' }] } }
+    return { value: { ranked: [{ ...best, key: `${best.provider}/${best.model}`, tier: 'quota' }], dropped: [] } }
+  })
+  on('providers.roots', value({ roots: ['/home/u/p'], files: [] }))
+  on('agents.kinds', value({ oneshot: { cacheTtl: '5m' } }))
+  on('agents.start', ($: unknown, e: { session: string; provider: string; kind: string; job: { model: string; effort?: string; read: unknown; web: boolean }; group: string; label: string }) => {
+    world.started.push({ provider: e.provider, kind: e.kind, model: e.job.model, read: e.job.read, web: e.job.web, ...(e.job.effort === undefined ? {} : { effort: e.job.effort }) })
+    const job = { ...e.job, cacheTtl: '5m' }
+    return { value: { id: `r${world.started.length}`, session: world.session, group: e.group, label: e.label, provider: e.provider, key: `${e.provider}/${e.job.model}`, kind: e.kind, job, status: 'running', current: `r${world.started.length}`, costUsd: 0, isCostEstimate: false, followUps: 0, startedAt: 0 } }
+  })
+  on('agents.activity', () => ({ value: world.activity }))
+  on('agents.ended', ($: unknown, e: unknown) => ({ value: e }))
+  on('conversation.deliver', ($: unknown, e: { text: string }) => {
+    world.delivered.push(e.text)
+    return { value: undefined }
+  })
   on('providers.quota', value([]))
   on('providers.limits', ($: unknown, e: { session: string }) => ({ value: limitsOf(e.session) }))
   on('providers.raise', ($: unknown, e: { session: string; pool: string; usd: number }) => {
@@ -108,6 +162,7 @@ function setup(on: any) {
   on('ui.toast', value(undefined))
   on('ui.log', value(undefined))
   on('session.start', () => ({ cwd: '/home/u/p' }))
+  on('turn.start', ($: unknown, e: unknown) => e)
   on('turn.complete', () => ({ text: '' }))
   return { clock, world }
 }
@@ -203,4 +258,123 @@ test('a pause nobody carries to the person, or one they never saw, is told in th
   await settle(clock)
   expect(world.notices).toHaveLength(2)
   expect(world.notices[1]).toContain('in the codex pool')
+})
+
+const tool = ($: any, name: string, input: Record<string, unknown>) => $.tool.call({ tool: `mcp__cc-crew__${name}`, tool_use_id: 't1', ...input })
+const review = ($: any, input: Record<string, unknown>) => tool($, 'review', { prompt: 'Look at X.', ...input })
+const end = ($: any, run: Record<string, unknown>, outcome: Record<string, unknown>) => $.command.run({ command: 'crew-test-ended', args: JSON.stringify({ run: { status: outcome.status, usedModel: 'm', session: 'A', key: 'codex/gpt-6.1-sol', followUps: 0, costUsd: 0, isCostEstimate: false, startedAt: 0, ...run }, outcome }) })
+const ANSWER = JSON.stringify({ scopes: [{ scope: 'Parser', report: 'Read it.', findings: [{ title: 'Off by one', priority: 1, confidence: 1, body: 'b', evidence: 'e', references: ['a.ts:1'] }], references: [] }], not_read: [] })
+
+test("a call runs the models for the session's model, each with its settings and the provider picked for it; research runs apart, reading nothing unless told", MODS, async ($, on) => {
+  const { clock, world } = setup(on)
+  await start($)
+  await settle(clock)
+  expect(JSON.stringify(await review($, { paths: ['.'] }))).toContain('Started review-1 with 2 agents.')
+  expect(world.started).toEqual([
+    { provider: 'claude', kind: 'oneshot', model: 'claude-sonnet-5-5', effort: 'high', read: ['.'], web: false },
+    { provider: 'codex', kind: 'oneshot', model: 'gpt-6.1-sol', effort: 'medium', read: ['.'], web: false },
+  ])
+  world.model = 'glm-5.3'
+  await review($, { paths: ['src'] })
+  expect(world.started.slice(2)).toEqual([{ provider: 'codex', kind: 'oneshot', model: 'gpt-6.1-sol', effort: 'medium', read: ['src'], web: false }])
+  expect(JSON.stringify(await tool($, 'research', { prompt: 'What changed in Y?' }))).toContain('Started research-1')
+  expect(world.started.slice(3)).toEqual([{ provider: 'codex', kind: 'oneshot', model: 'gpt-6.1-sol', read: 'none', web: true }])
+})
+
+test('a call that names models or settings, a review without paths, or a job with nobody to run it is refused, saying what to do', MODS, async ($, on) => {
+  const { clock, world } = setup(on)
+  await start($)
+  await settle(clock)
+  expect(JSON.stringify(await review($, { paths: ['.'], model: 'gpt-6.1-sol', web: true }))).toContain('crew: review takes prompt, paths, diff, not model, web; which models run it and how is set in the crew tab and crew.json')
+  expect(JSON.stringify(await review($, {}))).toContain('crew: review needs paths: what its agents may read, \\".\\" for the project')
+  expect(JSON.stringify(await tool($, 'research', { prompt: 'Y?', diff: 'uncommitted' }))).toContain('research takes prompt, paths, not diff')
+  expect(JSON.stringify(await tool($, 'jobs', { all: true }))).toContain('crew: jobs takes nothing, not all"')
+  expect(JSON.stringify(await review($, { paths: [] }))).toContain('paths must be a non-empty list of paths')
+  expect(JSON.stringify(await review($, { paths: ['.'], diff: 'all of it' }))).toContain('diff must be \\"uncommitted\\", { base } or { commit }')
+  expect(world.started).toEqual([])
+})
+
+test('a model nobody can run now is left out and the person told; with none left the call is refused, saying why', MODS, async ($, on) => {
+  const { clock, world } = setup(on)
+  await start($)
+  await settle(clock)
+  world.model = 'glm-5.3'
+  const record = `${RECORDS}/A.json`
+  world.files.set(record, JSON.stringify({ jobs: { review: { ticked: ['zhipu/glm-5.3', 'openai/gpt-6.1-sol'] } } }))
+  world.session = 'B'
+  await turnEnd($)
+  world.session = 'A'
+  await turnEnd($)
+  expect(JSON.stringify(await review($, { paths: ['.'] }))).toContain('Started review-1 with 1 agent.')
+  expect(world.notices.at(-1)).toBe('crew: zhipu/glm-5.3: review-1 runs without it: zai/zhipu/glm-5.3: its pool Z has no quota left')
+  world.files.set(record, JSON.stringify({ jobs: { review: { ticked: ['zhipu/glm-5.3'] } } }))
+  world.session = 'B'
+  await turnEnd($)
+  world.session = 'A'
+  await turnEnd($)
+  expect(JSON.stringify(await review($, { paths: ['.'] }))).toContain('no model can run review now: zhipu/glm-5.3: zai/zhipu/glm-5.3: its pool Z has no quota left')
+})
+
+test('the end of a job arrives as a message, the jobs tool lists it until a full report read acks it, and the report names no model', MODS, async ($, on) => {
+  const { clock, world } = setup(on)
+  await start($)
+  await settle(clock)
+  world.model = 'glm-5.3'
+  await review($, { paths: ['.'] })
+  expect(JSON.stringify(await tool($, 'jobs', {}))).toContain('review-1 running 0m \\"Look at X.\\"')
+  await end($, { id: 'r1', group: 'A/review-1', label: 'A', provider: 'codex' }, { status: 'ok', text: ANSWER, model: 'gpt-6.1-sol' })
+  await settle(clock)
+  expect(world.delivered).toHaveLength(1)
+  expect(world.delivered[0]).toContain('review-1 "Look at X." finished: 1 findings in Parser (1).')
+  expect(JSON.stringify(await tool($, 'jobs', {}))).toContain('review-1 done, unread')
+  const findings = JSON.stringify(await tool($, 'report', { id: 'review-1', findings_only: true }))
+  expect(findings).toContain('[P1] Off by one')
+  expect(findings).not.toContain('gpt')
+  expect(JSON.stringify(await tool($, 'jobs', {}))).toContain('review-1 done, unread')
+  expect(JSON.stringify(await tool($, 'report', { id: 'review-1' }))).toContain('Read it.')
+  expect(JSON.stringify(await tool($, 'jobs', {}))).toContain('Nothing runs and nothing is unread.')
+  expect(JSON.stringify(await tool($, 'report', { id: 'review-9' }))).toContain('crew: no job review-9')
+})
+
+test('a stalled agent wakes the conversation only once it is idle, saying what the agent is on; stop reaches the agent named', MODS, async ($, on) => {
+  const { clock, world } = setup(on)
+  const stopped: unknown[] = []
+  on('agents.stop', ($$: unknown, e: unknown) => {
+    stopped.push(e)
+    return { value: { isStopping: true } }
+  })
+  await start($)
+  await settle(clock)
+  world.model = 'glm-5.3'
+  await review($, { paths: ['.'] })
+  world.activity = { lastAt: 0, steps: 1, open: [{ tool: 'WebFetch', target: 'https://x.invalid', since: 0 }] }
+  await $.turn.start({ text: 'go', turnId: 'busy' })
+  await clock.advance(11 * 60_000)
+  await settle(clock)
+  expect(world.delivered).toEqual([])
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 'busy', reason: 'answer' })
+  await clock.advance(60_000)
+  await settle(clock)
+  expect(world.delivered).toHaveLength(1)
+  expect(world.delivered[0]).toContain('agent A: waiting on WebFetch https://x.invalid for')
+  expect(JSON.stringify(await tool($, 'jobs', {}))).toContain('waiting on WebFetch')
+  expect(JSON.stringify(await tool($, 'stop', { id: 'review-1', agent: 'A' }))).toContain('Stopping 1 agent')
+  expect(stopped).toEqual([{ id: 'r1' }])
+})
+
+test('ticks and pokes in the tab hold for the session, surviving a reload through its record', MODS, async ($, on) => {
+  const { clock, world } = setup(on)
+  on('sidebar.room', () => ({ value: { drawer: 30, popout: 0, drawerFrameColumns: 4, modal: { rows: 30, columns: 80 } } }))
+  on('ui.render', { component: 'InfoNotice' }, ($$: any, e: unknown) => $$.ui.resolve(e).Box({ key: 'sidebar-drawer:crew' }))
+  await start($)
+  await settle(clock)
+  world.model = 'glm-5.3'
+  const ui = await ($ as any).ui.mount({ plugin: 'cc-crew', surface: 'terminal', component: 'InfoNotice', props: { command: null, text: '' }, viewport: { columns: 80, rows: 30, isDocked: false } })
+  await ui.post({ tick: { job: 'review', model: 'anthropic/claude-sonnet-5-5' } })
+  await ui.post({ tick: { job: 'review', model: 'openai/gpt-6.1-sol' } })
+  await ui.post({ poke: { job: 'review', model: 'anthropic/claude-sonnet-5-5', by: 5 } })
+  await ui.post({ tick: { job: 'nothing', model: 'x' } })
+  expect(JSON.parse(world.files.get(`${RECORDS}/A.json`)!).jobs).toEqual({ review: { ticked: ['anthropic/claude-sonnet-5-5'], pokeMin: { 'anthropic/claude-sonnet-5-5': 25 } } })
+  await review($, { paths: ['.'] })
+  expect(world.started.map(s => s.model)).toEqual(['claude-sonnet-5-5'])
 })

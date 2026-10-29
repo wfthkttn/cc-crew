@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-import type { LimitsProps, LogProps, OverviewAction, OverviewProps, QuotaProps, RoleRow, RunningProps, Tab, UsageProps } from './overview-props'
+import type { JobsProps, LimitsProps, LogProps, OverviewAction, OverviewProps, QuotaProps, RoleRow, RunningProps, Tab, UsageProps } from './overview-props'
 
 export const OVERVIEW_COLUMNS = 64
 
@@ -66,9 +66,9 @@ function tabLines(props: OverviewProps): Line[] {
   const label = (tab: Tab): string => {
     if (tab === 'running') return ` Running${props.counts.running > 0 ? ' ' + props.counts.running : ''} `
     if (tab === 'log') return ` Log${props.counts.log > 0 ? ' ' + props.counts.log : ''} `
-    return tab === 'usage' ? ' Usage ' : tab === 'limits' ? ' Limits ' : ' Quota '
+    return tab === 'jobs' ? ' Jobs ' : tab === 'usage' ? ' Usage ' : tab === 'limits' ? ' Limits ' : ' Quota '
   }
-  const tabs: Tab[] = ['running', 'usage', 'limits', 'quota', 'log']
+  const tabs: Tab[] = ['running', 'jobs', 'usage', 'limits', 'quota', 'log']
   const row: Line = tabs.flatMap((tab, i) => [
     ...(i > 0 ? [{ text: '│', color: MUTED }] : []),
     { text: label(tab), action: { tab }, ...(tab === props.tab ? { color: HEADING, bold: true } : { color: MUTED }) },
@@ -92,13 +92,13 @@ function runningLines(props: RunningProps): Line[] {
     }
     const description = OVERVIEW_COLUMNS - 1 - 1 - 5 - 1 - OPEN_COLUMNS - 1 - STOP_COLUMNS
     lines.push([
-      { text: ' ' + fit(`review: ${item.description}`, description) + ' ', color: TEXT, bold: true },
+      { text: ' ' + fit(item.description, description) + ' ', color: TEXT, bold: true },
       { text: right(item.elapsed, 5) + ' ', color: MUTED },
       ...pill(OPEN_LABEL, { open: { run: item.id } }),
       { text: ' ' },
       ...pill(STOP_LABEL, { stop: { run: item.id } }, true),
     ])
-    for (const r of item.reviewers) {
+    for (const r of item.members) {
       const head: Line = [
         { text: '   ' + fit(r.provider, 12), color: TEXT },
         { text: fit(r.pick, 15) + ' ', color: MUTED },
@@ -107,9 +107,32 @@ function runningLines(props: RunningProps): Line[] {
       ]
       const tail: Line = r.isRunning ? pill(STOP_LABEL, { stop: { run: item.id, key: r.key } }, true) : [{ text: r.tokens ?? '', color: MUTED }]
       lines.push([...head, ...tail])
+      if (r.reading !== null) lines.push([{ text: `     └ ${r.reading}`, color: r.isStalled ? OVER : MUTED }])
     }
   }
   return lines
+}
+
+/** Room for a model such as `anthropic/claude-sonnet-5-5`. */
+const MODEL_COLUMNS = 30
+
+/** Each job's models: a tick per model, and its poke with a step down and up. */
+function jobsLines(props: JobsProps): Line[] {
+  const lines: Line[] = []
+  for (const j of props.jobs) {
+    lines.push(heading(j.job))
+    for (const m of j.models) {
+      lines.push([
+        ...pill(`${m.isTicked ? '●' : '○'} ${fit(m.model, MODEL_COLUMNS)}`, { tick: { job: j.job, model: m.model } }, !m.isTicked),
+        { text: right(`${m.pokeMin}m`, 5) + ' ', color: MUTED },
+        ...pill('-5', { poke: { job: j.job, model: m.model, by: -5 } }),
+        { text: ' ' },
+        ...pill('+5', { poke: { job: j.job, model: m.model, by: 5 } }),
+      ])
+    }
+    lines.push([{ text: '' }])
+  }
+  return [...lines, muted('A call runs the ticked models. The minutes: how long an idle chat'), muted('waits to hear how they go. Both hold for this session.')]
 }
 
 /** An agent's line: what it is, then its clock, status and tokens. */
@@ -149,7 +172,7 @@ const USAGE_COLUMNS: readonly Column[] = [
   { title: '$ API', width: 8, isNumber: true },
 ]
 
-/** This chat, then each pool in bold with its models under it; a pool's or model's row opens its reviewers and agents. */
+/** This chat, then each pool in bold with its models under it; a pool's or model's row opens its jobs and agents. */
 function usageLines(props: UsageProps, opened: OverviewProps['opened']): Line[] {
   const rows = props.rows.map(r => ({
     cells: [`${r.isPart ? '  ' : ''}${r.label}${r.isGuessed ? ' ?' : ''}`, r.count, r.new, r.cached, r.out, r.usd],
@@ -161,7 +184,7 @@ function usageLines(props: UsageProps, opened: OverviewProps['opened']): Line[] 
     [{ text: '' }],
     ...(props.isGuessing ? [muted('? priced at the dearest it could be, or not placed in a pool'), muted('  by providers.json: an upper bound.')] : []),
     muted('$ at API prices weighs each model as its quota does.'),
-    muted('Press a pool or model for its reviewers and agents.'),
+    muted('Press a pool or model for its jobs and agents.'),
   ]
 }
 
@@ -242,7 +265,7 @@ function limitsLines(props: LimitsProps): Line[] {
     [{ text: '' }],
     ...gates,
     [{ text: '' }],
-    muted("Helpers (reviewers, Claude's agents) past their limit are refused;"),
+    muted("Helpers (job agents, Claude's agents) past their limit are refused;"),
     muted('the chat past its limit is paused but for turns you start.'),
     muted('Pools, prices, limits: providers.json; raises and switches hold'),
     muted('for this session.'),
@@ -272,13 +295,15 @@ export function overviewLines(props: OverviewProps): Line[] {
   const body =
     props.tab === 'running'
       ? runningLines(props.running)
-      : props.tab === 'usage'
-        ? usageLines(props.usage, props.opened)
-        : props.tab === 'log'
-          ? logLines(props.log, props.rows, props.opened)
-          : props.tab === 'quota'
-            ? quotaLines(props.quota)
-            : limitsLines(props.limits)
+      : props.tab === 'jobs'
+        ? jobsLines(props.jobs)
+        : props.tab === 'usage'
+          ? usageLines(props.usage, props.opened)
+          : props.tab === 'log'
+            ? logLines(props.log, props.rows, props.opened)
+            : props.tab === 'quota'
+              ? quotaLines(props.quota)
+              : limitsLines(props.limits)
   return [...tabLines(props), ...body].map(full)
 }
 

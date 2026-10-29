@@ -1,108 +1,77 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 'cc-sidebar'
 import type { BusPersonAnswered } from 'cc-bus'
-import type { ProvidersGroup, ProvidersInfo, ProvidersLimitReached, ProvidersLimits } from 'cc-providers'
+import type { ProvidersGroup, ProvidersInfo, ProvidersLimitReached, ProvidersLimits, ProvidersProvider } from 'cc-providers'
 
 import { ClaudeAgents } from './agents.ts'
 import type { ChangeSpec } from './changes.ts'
-import { type Choice, type Settings, settingsFrom, withDefaults } from './config.ts'
+import { type CrewFile, type Effective, effective, type JobSpec, mergeCrew, modelsFor, parseCrewFile, settingsFrom } from './config.ts'
 import { wrap } from './detail.ts'
 import type { Io } from './io.ts'
+import { type Alert, type AgentsPort, type Jobs, makeJobs, type Picked, type ProvidersPort, Refused } from './jobs.ts'
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
 import type { DetailProps, Role, Tab, Target } from './overview-props.ts'
-import { isAbsolute, isInside, isWindowsPath, join, namesOf } from './paths.ts'
-import { REVIEWER_PROMPT, systemPrompt } from './prompt.ts'
-import { gaugeColumns, quotaProps, type QuotaView } from './quota.ts'
+import { join } from './paths.ts'
+import { systemPrompt } from './prompt.ts'
+import { gaugeColumns, type QuotaView } from './quota.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
-import { type Alert, type AgentsPort, makeReviews, type ProvidersPort, Refused, type Reviews, type ReviewerSpec } from './reviews.ts'
 import { fillSlot, hasSlot } from './slot.ts'
 import { claudeTokens, sum, usd } from './usage.ts'
-import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, overviewProps, runDetail, usageDetail } from './views.ts'
+import { type Badge, RAISES_USD, agentDetail, badgeOf, itemsOf, jobDetail, overviewProps, usageDetail } from './views.ts'
 
-const REVIEW_DESCRIPTION = `Get independent reviews from other models, each in its own harness, run headless through cc-providers. Use it for a second opinion on code, a change, a design or a document.
+const PREFIX = 'mcp__cc-crew__'
 
-Each reviewer reads only what \`read\` allows (the project by default), secret files (.env and the like) are always blocked, the rest of the disk is closed, and nothing is written except the reports. It runs in the background by default: you get the run id at once and a message with every reviewer's result when all are done. Do not poll or wait for it.
+const RUNS_IN_BACKGROUND = `It runs in the background: you get its id at once, and a message when it finishes, or when an agent behind it stalls. Do not poll or wait for it. Agents read only the paths you name, secret files are always closed to them, and they change nothing. Read the result with \`report\`, not from files.`
 
-Brief it like a colleague who just walked into the room: the reviewers know nothing of this conversation. Say what to review, what matters, what you already know or suspect is out of scope. With \`changes\`, the diff is put in front of every reviewer.
-
-Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out, out of quota or past its limit is reported loudly and the others carry on. A reviewer's cache stays warm for five minutes after it answers, so a follow-up within them is cheap; the summary says until when.`
-
-const MODEL_NOTES: Record<string, string> = {
-  codex: 'codex takes its own model names and effort low|medium|high|xhigh|max|ultra',
-  antigravity: 'antigravity takes ids such as gemini-4-argon-high, gemini-3.8-flash-medium, claude-opus-5-5-high, claude-sonnet-5-5-medium, gpt-oss-120b-medium, or a model plus effort',
-  claude: 'claude takes sonnet|opus|haiku and effort low|medium|high|xhigh|max, and runs on Claude whatever backend this session uses',
-}
-
-function reviewDescription(reviewable: readonly ProvidersInfo[]): string {
-  const names = reviewable.map(p => (MODEL_NOTES[p.id] !== undefined ? `${MODEL_NOTES[p.id]}` : `${p.id} (${p.name}) runs its own models, a call's model and effort passed on`))
-  return `${REVIEW_DESCRIPTION}\n\nReviewers: ${reviewable.map(p => p.id).join(', ')}. A reviewer whose call names no model or effort runs the configured default for its provider. ${names.join('. ')}.`
-}
-
-function reviewSchema(providers: readonly string[]) {
-  const item = {
+function jobSchema(spec: JobSpec) {
+  const diff = {
+    description: 'A git diff to put in front of every agent, from the repository of the first path: "uncommitted", { "base": "<branch>" } or { "commit": "<sha>" }',
+    anyOf: [
+      { type: 'string', enum: ['uncommitted'] },
+      { type: 'object', properties: { base: { type: 'string' } }, required: ['base'], additionalProperties: false },
+      { type: 'object', properties: { commit: { type: 'string' } }, required: ['commit'], additionalProperties: false },
+    ],
+  }
+  const paths = { type: 'array', items: { type: 'string' }, description: `What its agents may read, absolute or relative to the project; "." is the project${spec.paths === 'optional' ? '. Without it they read nothing on disk' : ''}` }
+  return {
     type: 'object',
-    properties: {
-      provider: { type: 'string', enum: [...providers] },
-      model: { type: 'string' },
-      effort: { type: 'string' },
-    },
-    required: ['provider'],
+    properties: { prompt: { type: 'string', description: 'The self-contained brief' }, paths, ...(spec.diff ? { diff } : {}) },
+    required: ['prompt', ...(spec.paths === 'required' ? ['paths'] : [])],
     additionalProperties: false,
   }
-  return { ...REVIEW_SCHEMA, properties: { ...REVIEW_SCHEMA.properties, reviewers: { type: 'array', items: item, description: 'Who reviews; the configured default set when omitted' } } }
 }
 
-const REVIEW_SCHEMA = {
+const JOBS_SCHEMA = { type: 'object', properties: {}, additionalProperties: false }
+
+const REPORT_SCHEMA_INPUT = {
   type: 'object',
   properties: {
-    description: { type: 'string', description: 'A short (3-5 word) description of the review' },
-    prompt: { type: 'string', description: 'The self-contained brief every reviewer gets' },
-    read: {
-      description: '"project" (default), "none", or a list of paths (absolute, or relative to the project)',
-      anyOf: [{ type: 'string', enum: ['project', 'none'] }, { type: 'array', items: { type: 'string' } }],
-    },
-    web: {
-      type: 'boolean',
-      description:
-        'Allow web search and page reads (default false). Content under review can then steer a reviewer into fetching a URL that carries what it read: secrets stay closed, the reviewed code does not.',
-    },
-    helpers: { type: 'boolean', description: 'Let Codex and Antigravity reviewers run their own helper agents (default false)' },
-    changes: {
-      description: 'Review a change: "uncommitted", { "base": "<branch>" } or { "commit": "<sha>" } in the first read path',
-      anyOf: [
-        { type: 'string', enum: ['uncommitted'] },
-        { type: 'object', properties: { base: { type: 'string' } }, required: ['base'], additionalProperties: false },
-        { type: 'object', properties: { commit: { type: 'string' } }, required: ['commit'], additionalProperties: false },
-      ],
-    },
-    report_dir: { type: 'string', description: 'Where the run folder goes, under <project>/.claude/work/' },
-    background: { type: 'boolean', description: 'Return at once and deliver the results as a message (default true)' },
+    id: { type: 'string', description: 'The id its start or `jobs` gave, such as review-3' },
+    scope: { type: 'string', description: 'Read this scope alone' },
+    findings_only: { type: 'boolean', description: 'Read only the findings and their references' },
   },
-  required: ['description', 'prompt'],
+  required: ['id'],
   additionalProperties: false,
 }
 
-const CONTINUE_SCHEMA = {
+const STOP_SCHEMA = {
   type: 'object',
   properties: {
-    run: { type: 'string', description: 'The run id' },
-    reviewer: { type: 'string', description: 'The reviewer key from the run summary, e.g. codex-default' },
-    message: { type: 'string', description: 'The follow-up; the reviewer still knows only its own conversation' },
-    background: { type: 'boolean', description: 'Return at once and deliver the answer as a message (default true)' },
+    id: { type: 'string', description: 'The id its start or `jobs` gave, such as review-3' },
+    agent: { type: 'string', description: 'The letter of one agent; every running agent of it when left out' },
   },
-  required: ['run', 'reviewer', 'message'],
+  required: ['id'],
   additionalProperties: false,
 }
 
-const STATUS_SCHEMA = {
-  type: 'object',
-  properties: { run: { type: 'string', description: 'One run; all of this session when omitted' } },
-  additionalProperties: false,
-}
-
-let settings: Settings
-let system = REVIEWER_PROMPT
+let rules: { path: string; text: string }[] = []
+/** The jobs, read at session start. */
+let crew: CrewFile
 let cacheDir = ''
+/** What one press moves a poke by, in minutes. */
+const MINUTES_STEP = 5
+/** How often running agents are read for signs of life. */
+const LIVENESS_MS = 60_000
 
 const TAB_ID = 'crew'
 const DRAWER_SLOT: SidebarDrawerSlot = `sidebar-drawer:${TAB_ID}`
@@ -130,17 +99,21 @@ const QUOTA_MS = 30_000
 
 /** The session crew draws and records, moved by `follow`. */
 let sessionId = ''
-/** Made at the first session start of this load: reviews running across a `/clear` still end into it. */
-let reviews: Reviews | null = null
+/** Made at the first session start of this load: jobs running across a `/clear` still end into it. */
+let jobs: Jobs | null = null
 const claudeAgents = new ClaudeAgents()
-/** What the modal shows: a review or agent with its brief or prompt as read when it was opened, or a pool or model worked out on each draw; the page it is at. */
+/** What the modal shows: a job or agent with its brief or prompt as read when it was opened, or a pool or model worked out on each draw; the page it is at. */
 let detail: { target: Target; text: string; page: number } | null = null
 let ticker: { cancel(): void } | null = null
 let quotaTicker: { cancel(): void } | null = null
+let livenessTicker: { cancel(): void } | null = null
+/** Turns under way: none means the conversation is idle, so a poke can wake it. */
+const openTurns = new Set<string>()
 let record: SessionRecord = emptyRecord()
 let view: { tab: Tab; page: number } = { tab: 'running', page: 0 }
 /** Set at session start and read again with the quota. */
 let providersInfo: ProvidersInfo[] = []
+let catalog: ProvidersProvider[] = []
 let groups: ProvidersGroup[] = []
 let quotaViews: QuotaView[] = []
 /** Why the last quota read failed, shown on the Quota tab. */
@@ -156,9 +129,9 @@ let openAsk: Ask | null = null
 let asking: Promise<unknown> = Promise.resolve()
 let following: Promise<void> = Promise.resolve()
 
-function liveReviews(): Reviews {
-  if (reviews === null) throw new Error('crew: reviews are used before session start')
-  return reviews
+function liveJobs(): Jobs {
+  if (jobs === null) throw new Error('crew: jobs are used before session start')
+  return jobs
 }
 
 function liveLimits(): ProvidersLimits {
@@ -166,9 +139,12 @@ function liveLimits(): ProvidersLimits {
   return limits
 }
 
-const sessionViews = () => liveReviews().sessionReviews(sessionId).map(r => liveReviews().viewOf(r))
-const reviewable = () => providersInfo.filter(p => p.styles.some(s => s.startsWith('cli:')))
-const gates = () => [...providersInfo.map(p => p.id), 'agents']
+const sessionViews = () => liveJobs().sessionJobs(sessionId).map(j => liveJobs().viewOf(j))
+/** The tab's switches: each provider that runs headless, and Claude's own agents. */
+const gates = () => [...catalog.filter(p => Object.keys(p.endpoints).some(s => s.startsWith('cli:'))).map(p => p.id), 'agents']
+
+/** The session's own model as cc-providers keys it; a job's list can depend on it. */
+const sessionKey = async ($: EngineInterface) => $.providers.modelKey({ provider: sessionProvider, model: await $.session.model() })
 
 async function keep($: EngineInterface): Promise<void> {
   record.agents = claudeAgents.all()
@@ -188,7 +164,7 @@ export function detailProps(title: string, text: string, room: { rows: number; c
   return { title, lines: shown, columns: room.columns, page: at, pages, first: at * size + 1, last: at * size + shown.length, total: lines.length }
 }
 
-/** The pop-out's title and text for what it shows, from the review's, agent's or model's state now; null once it is gone. */
+/** The pop-out's title and text for what it shows, from the job's, agent's or model's state now; null once it is gone. */
 function shownDetail(shown: NonNullable<typeof detail>, now: number): { title: string; text: string } | null {
   const target = shown.target
   if ('group' in target || 'model' in target) {
@@ -197,8 +173,8 @@ function shownDetail(shown: NonNullable<typeof detail>, now: number): { title: s
     return { title, text: usageDetail(groups, items, liveLimits(), target, now) }
   }
   if ('run' in target) {
-    const review = liveReviews().sessionReviews(sessionId).find(r => r.id === target.run)
-    return review === undefined ? null : { title: `review: ${review.description}`, text: runDetail(liveReviews().viewOf(review), shown.text) }
+    const job = liveJobs().sessionJobs(sessionId).find(j => j.id === target.run)
+    return job === undefined ? null : { title: `${job.id}: ${job.title}`, text: jobDetail(liveJobs().viewOf(job), shown.text) }
   }
   const id = target.agent
   const agent = claudeAgents.all().find(a => a.id === id)
@@ -219,9 +195,9 @@ async function open($: EngineInterface, target: Target): Promise<void> {
   }
   let path: string
   if ('run' in target) {
-    const review = liveReviews().sessionReviews(sessionId).find(r => r.id === target.run)
-    if (review === undefined) throw new Error(`crew: no review ${target.run} in this session to open`)
-    path = `${review.reportDir}/brief.md`
+    const job = liveJobs().sessionJobs(sessionId).find(j => j.id === target.run)
+    if (job === undefined) throw new Error(`crew: no job ${target.run} in this session to open`)
+    path = join(job.dir, 'brief.md')
   } else {
     path = promptPath(target.agent)
   }
@@ -243,11 +219,11 @@ async function syncBadge($: EngineInterface): Promise<void> {
   await $.sidebar.badge({ id: TAB_ID, ...next })
 }
 
-/** Reads the session's record, agents, reviews and limits; they replace what crew held only once all are read. */
+/** Reads the session's record, agents, jobs and limits; they replace what crew held only once all are read. */
 async function enter($: EngineInterface, id: string): Promise<void> {
   const entered = await loadRecord(ioOf($), recordPath(cacheDir, id))
   const listed = await $.agent.list()
-  await liveReviews().restore(ioOf($), agentsOf($), id)
+  await liveJobs().restore(ioOf($), agentsOf($), id)
   const read = await $.providers.limits({ session: id })
   claudeAgents.restore(entered.agents, listed)
   record = entered
@@ -282,11 +258,27 @@ async function tick($: EngineInterface): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
+/**
+ * Reads how the running agents are doing, for the tab and `jobs`. The idle conversation hears of an agent stalled or
+ * ended badly, and of a job past its poke; a busy one hears when its turn ends and the next read finds it idle.
+ */
+async function watchJobs($: EngineInterface): Promise<void> {
+  await follow($)
+  const all = liveJobs()
+  const now = await $.clock.now()
+  await all.read(agentsOf($), sessionId, now)
+  if (openTurns.size > 0) return
+  for (const job of all.sessionJobs(sessionId)) {
+    const text = all.poke(job, now)
+    if (text !== undefined) await $.conversation.deliver({ from: 'crew', text })
+  }
+}
+
 /** Reads the providers, their pools and their quota again, and draws the gauge. */
 async function readQuota($: EngineInterface): Promise<void> {
   try {
     providersInfo = await $.providers.list()
-    groups = (await $.providers.catalog()).groups
+    ;({ providers: catalog, groups } = await $.providers.catalog())
     quotaViews = await Promise.all(providersInfo.map(async info => ({ info, slots: await $.providers.quota({ provider: info.id, session: sessionId }) })))
     quotaError = null
   } catch (err) {
@@ -307,34 +299,25 @@ function str(f: Fields, key: string): string {
   return v
 }
 
-/** A reviewer named in a call or in the default list, its provider's defaults filled in. */
-function specOf(provider: string, own: Choice, where: string): ReviewerSpec {
-  const known = reviewable().map(p => p.id)
-  if (!known.includes(provider)) throw new BadInput(`unknown reviewer ${provider} ${where} (known: ${known.join(', ')}; others are providers in ~/.config/providers/providers.json with a cli: endpoint)`)
-  return withDefaults({ provider, ...own }, settings.defaults)
+/** A call's fields other than these are refused, saying what it takes. */
+function only(f: Fields, name: string, takes: readonly string[], hint = ''): void {
+  const extra = Object.keys(f).filter(k => !takes.includes(k))
+  if (extra.length > 0) throw new BadInput(`${name} takes ${takes.length === 0 ? 'nothing' : takes.join(', ')}, not ${extra.join(', ')}${hint}`)
 }
 
-function reviewersOf(f: Fields): ReviewerSpec[] {
-  if (f.reviewers === undefined) return settings.reviewers.map(provider => specOf(provider, {}, 'in the default reviewers setting'))
-  if (!Array.isArray(f.reviewers) || f.reviewers.length === 0) throw new BadInput('reviewers must be a non-empty list')
-  return f.reviewers.map((r: Fields) => {
-    if (typeof r.provider !== 'string') throw new BadInput(`a reviewer's provider must be a string, not ${String(r.provider)}`)
-    const own: Choice = {}
-    if (typeof r.model === 'string') own.model = r.model
-    if (typeof r.effort === 'string') own.effort = r.effort
-    return specOf(r.provider, own, 'in the call')
-  })
+/** What its agents may read, from the call. */
+function readOf(f: Fields, name: string, spec: JobSpec): 'none' | string[] {
+  const v = f.paths
+  if (v === undefined) {
+    if (spec.paths === 'required') throw new BadInput(`${name} needs paths: what its agents may read, "." for the project`)
+    return 'none'
+  }
+  if (Array.isArray(v) && v.length > 0 && v.every(p => typeof p === 'string' && p !== '')) return v as string[]
+  throw new BadInput('paths must be a non-empty list of paths')
 }
 
-function readOf(f: Fields): 'project' | 'none' | string[] {
-  const v = f.read ?? 'project'
-  if (v === 'project' || v === 'none') return v
-  if (Array.isArray(v) && v.length > 0 && v.every(p => typeof p === 'string')) return v as string[]
-  throw new BadInput('read must be "project", "none" or a non-empty list of paths')
-}
-
-function changesOf(f: Fields): ChangeSpec | undefined {
-  const v = f.changes
+function diffOf(f: Fields): ChangeSpec | undefined {
+  const v = f.diff
   if (v === undefined) return undefined
   if (v === 'uncommitted') return v
   if (typeof v === 'object' && v !== null) {
@@ -342,18 +325,20 @@ function changesOf(f: Fields): ChangeSpec | undefined {
     if (typeof o.base === 'string') return { base: o.base }
     if (typeof o.commit === 'string') return { commit: o.commit }
   }
-  throw new BadInput('changes must be "uncommitted", { base } or { commit }')
+  throw new BadInput('diff must be "uncommitted", { base } or { commit }')
 }
 
-function reportBase(f: Fields, project: string): string {
-  const work = join(join(project, '.claude'), 'work')
-  const v = f.report_dir
-  if (v === undefined) return join(work, 'reviews')
-  if (typeof v !== 'string') throw new BadInput('report_dir must be a path')
-  const given = isAbsolute(v) ? v : join(project, v)
-  const path = isWindowsPath(given) ? given.replace(/[\\/]+$/, '') : given.replace(/\/+$/, '')
-  if (namesOf(path).includes('..') || !isInside(path, work)) throw new BadInput(`report_dir must be under ${work}`)
-  return path
+/** Each model picked a provider, or why it can't run now. */
+async function pickFor($: EngineInterface, settings: readonly Effective[]): Promise<{ picks: Picked[]; skipped: { serves: string; why: string }[] }> {
+  const picks: Picked[] = []
+  const skipped: { serves: string; why: string }[] = []
+  for (const s of settings) {
+    const { ranked, dropped } = await $.providers.pick({ session: sessionId, serves: s.serves, ...(s.provider === undefined ? {} : { provider: s.provider }), ...(s.effort === undefined ? {} : { effort: s.effort }) })
+    const best = ranked[0]
+    if (best === undefined) skipped.push({ serves: s.serves, why: dropped.length === 0 ? 'no provider offers it' : dropped.map(d => `${d.key}: ${d.why}`).join('; ') })
+    else picks.push({ ...s, provider: best.provider, model: best.model, key: best.key })
+  }
+  return { picks, skipped }
 }
 
 function ioOf($: EngineInterface): Io {
@@ -372,6 +357,7 @@ function agentsOf($: EngineInterface): AgentsPort {
     start: input => $.agents.start(input),
     followUp: input => $.agents.followUp(input),
     stop: input => $.agents.stop(input),
+    activity: input => $.agents.activity(input),
     get: input => $.agents.get(input),
     list: input => $.agents.list(input),
   }
@@ -379,7 +365,6 @@ function agentsOf($: EngineInterface): AgentsPort {
 
 function providersOf($: EngineInterface): ProvidersPort {
   return {
-    modelKey: input => $.providers.modelKey(input),
     refusal: input => $.providers.refusal(input),
     roots: input => $.providers.roots(input),
     secretPaths: input => $.providers.secretPaths(input),
@@ -397,69 +382,77 @@ function alertOf($: EngineInterface): Alert {
   }
 }
 
-async function startReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
+/** Starts the job a tool of its name was called for, answering its id; the end arrives as a message. */
+async function startJob($: EngineInterface, name: string, spec: JobSpec, f: Fields): Promise<string> {
   await follow($)
-  const description = str(f, 'description')
+  only(f, name, ['prompt', 'paths', ...(spec.diff ? ['diff'] : [])], '; which models run it and how is set in the crew tab and crew.json')
   const brief = str(f, 'prompt')
-  const specs = reviewersOf(f)
-  const read = readOf(f)
-  const changes = changesOf(f)
-  const project = await $.session.root()
-  const all = liveReviews()
-  const agents = agentsOf($)
-  const review = await all.begin(ioOf($), agents, providersOf($), alertOf($), {
+  const read = readOf(f, name, spec)
+  const diff = diffOf(f)
+  const kinds = await $.agents.kinds()
+  if (kinds[spec.kind] === undefined) throw new Refused(`${name} runs as kind ${spec.kind}, which cc-agents does not have (${Object.keys(kinds).join(', ')}); fix it in ~/.config/crew/crew.json`)
+  const choice = record.jobs[name]
+  const models = modelsFor(spec, await sessionKey($), choice)
+  if (models.length === 0) throw new Refused(`no model is ticked for ${name} in the crew tab; ask the person to tick one`)
+  const { picks, skipped } = await pickFor($, models.map(m => effective(spec, m, choice?.pokeMin?.[m])))
+  if (picks.length === 0) throw new Refused(`no model can run ${name} now: ${skipped.map(s => `${s.serves}: ${s.why}`).join('; ')}`)
+  const all = liveJobs()
+  const job = await all.begin(ioOf($), agentsOf($), providersOf($), alertOf($), {
     session: sessionId,
-    description,
+    job: name,
     brief,
-    specs,
+    picks,
+    skipped,
+    kind: spec.kind,
     read,
-    project,
-    reportBase: reportBase(f, project),
-    ...(changes === undefined ? {} : { changes }),
-    web: f.web === true,
-    helpers: f.helpers === true,
-    system,
-    timeoutMs: settings.timeoutMs,
+    project: await $.session.root(),
+    ...(diff === undefined ? {} : { diff }),
+    system: systemPrompt(await $.fs.read(spec.prompt), rules),
   })
-  if (f.background === false) {
-    signal.addEventListener('abort', () => void all.stop(agents, review.id))
-    await all.whenDone(review.id)
-    return all.summary(review)
-  }
-  if (all.isDone(review)) return all.summary(review)
-  void all.whenDone(review.id).then(() => $.conversation.deliver({ from: 'crew', text: `review finished.\n${all.summary(review)}` }))
-  const who = review.reviewers.map(r => r.key).join(', ')
-  return `Started crew review ${review.id} (${who}). The results arrive as a message when every reviewer is done; reports go to ${review.reportDir}.`
+  for (const s of skipped) await alertOf($)(s.serves, `${job.id} runs without it: ${s.why}`)
+  const finish = async () => $.conversation.deliver({ from: 'crew', text: await all.summary(ioOf($), job) })
+  if (all.isDone(job)) return all.summary(ioOf($), job)
+  void all.whenDone(job).then(finish)
+  return `Started ${job.id} with ${job.agents.length} agent${job.agents.length === 1 ? '' : 's'}. A message says when it finished; read it with report { id: "${job.id}" }.`
 }
 
-async function continueReview($: EngineInterface, f: Fields, signal: AbortSignal): Promise<string> {
+/** The running jobs and the finished ones not read in full yet. */
+async function listJobs($: EngineInterface, f: Fields): Promise<string> {
   await follow($)
-  const key = str(f, 'reviewer')
-  const all = liveReviews()
-  const agents = agentsOf($)
-  const { review, run } = await all.ask(ioOf($), agents, providersOf($), alertOf($), sessionId, str(f, 'run'), key, str(f, 'message'))
-  if (run.isRefused === true) throw new Refused(`${key}: ${run.detail ?? run.status}`)
-  if (f.background === false) {
-    signal.addEventListener('abort', () => void agents.stop({ id: run.id }))
-    await all.whenAnswered(run.id)
-    return all.summary(review)
-  }
-  void all.whenAnswered(run.id).then(() => $.conversation.deliver({ from: 'crew', text: `follow-up to ${key} finished.\n${all.summary(review)}` }))
-  return `Asked ${key} in run ${review.id}. Its answer arrives as a message.`
+  only(f, 'jobs', [])
+  const all = liveJobs()
+  const now = await $.clock.now()
+  const shown = all.sessionJobs(sessionId).filter(j => !all.isDone(j) || !j.isAcked)
+  if (shown.length === 0) return 'Nothing runs and nothing is unread.'
+  return (await Promise.all(shown.map(j => all.line(ioOf($), j, now)))).join('\n')
 }
 
-async function status($: EngineInterface, f: Fields): Promise<string> {
+async function readReport($: EngineInterface, f: Fields): Promise<string> {
   await follow($)
-  const all = liveReviews()
-  if (typeof f.run === 'string') return all.summary(await all.load(ioOf($), agentsOf($), f.run))
-  const lines = all.sessionReviews(sessionId).map(r => all.summary(r).split('\n')[0]!)
-  if (lines.length === 0) lines.push('No crew reviews in this session.')
-  const ids = reviewable().map(p => p.id)
-  const views = await Promise.all(providersInfo.filter(p => ids.includes(p.id)).map(async info => ({ info, slots: await $.providers.quota({ provider: info.id, session: sessionId }) })))
-  for (const block of quotaProps(views, await $.clock.now()).blocks) {
-    lines.push('', `${block.title} quota:`, ...block.rows.map(r => `- ${r.pool === '' ? '' : `${r.pool} `}${r.window}: ${r.left} left, resets ${r.resets}`), ...block.notes.map(n => `- ${n}`))
-  }
-  return lines.join('\n')
+  only(f, 'report', ['id', 'scope', 'findings_only'])
+  return liveJobs().report(ioOf($), agentsOf($), sessionId, str(f, 'id'), {
+    ...(f.scope === undefined ? {} : { scope: str(f, 'scope') }),
+    ...(f.findings_only === true ? { findingsOnly: true } : {}),
+  })
+}
+
+async function stopJob($: EngineInterface, f: Fields): Promise<string> {
+  await follow($)
+  only(f, 'stop', ['id', 'agent'])
+  const label = f.agent === undefined ? undefined : str(f, 'agent')
+  const count = await liveJobs().stop(agentsOf($), sessionId, str(f, 'id'), label)
+  return count === 0 ? 'Nothing of it was running.' : `Stopping ${count} agent${count === 1 ? '' : 's'}; the report keeps what the others find.`
+}
+
+/** The tool's work, or undefined for a tool that is none of crew's. */
+function toolWork($: EngineInterface, tool: string, f: Fields): Promise<string> | undefined {
+  if (!tool.startsWith(PREFIX)) return undefined
+  const name = tool.slice(PREFIX.length)
+  if (name === 'jobs') return listJobs($, f)
+  if (name === 'report') return readReport($, f)
+  if (name === 'stop') return stopJob($, f)
+  const spec = crew.jobs[name]
+  return spec === undefined ? undefined : startJob($, name, spec, f)
 }
 
 function fields(e: unknown): Fields {
@@ -469,8 +462,28 @@ function fields(e: unknown): Fields {
 function answer(work: Promise<string>) {
   return work.then(
     text => ({ result: text }),
-    (err: unknown) => ({ deny: err instanceof BadInput || err instanceof Refused ? `crew: ${err.message}` : `crew: ${String(err)}` }),
+    (err: unknown) => ({ deny: `crew: ${err instanceof Error ? err.message : String(err)}` }),
   )
+}
+
+/** Ticks or unticks a job's model for this session, from the list it runs now. */
+async function tickModel($: EngineInterface, name: string, model: string): Promise<void> {
+  const spec = crew.jobs[name]
+  if (spec?.models[model] === undefined) return
+  const now = modelsFor(spec, await sessionKey($), record.jobs[name])
+  const ticked = now.includes(model) ? now.filter(m => m !== model) : [...now, model]
+  record.jobs[name] = { ...record.jobs[name], ticked }
+  await keep($)
+}
+
+/** Moves a model's poke for this session, keeping it at one step or more. */
+async function movePoke($: EngineInterface, name: string, model: string, by: number): Promise<void> {
+  const spec = crew.jobs[name]
+  if (spec?.models[model] === undefined || Math.abs(by) !== MINUTES_STEP) return
+  const set = record.jobs[name]?.pokeMin
+  const was = set?.[model] ?? effective(spec, model, undefined).pokeMs / 60_000
+  record.jobs[name] = { ...record.jobs[name], pokeMin: { ...set, [model]: Math.max(MINUTES_STEP, was + by) } }
+  await keep($)
 }
 
 const KEEP_PAUSED = 'Keep paused'
@@ -565,30 +578,36 @@ export const register: Register = (on, options) => {
     const home = await $.env.get('HOME')
     if (home === undefined) throw new Error('crew: HOME is not set, so its cache folder is unknown')
     cacheDir = join(join(home, '.cache'), 'crew')
-    settings = settingsFrom(options)
-    const rules = await Promise.all(settings.reviewerRules.map(async path => ({ path, text: await $.fs.read(path) })))
-    system = systemPrompt(rules)
-    reviews ??= makeReviews(cacheDir)
+    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+    const claudeDir = configDir !== undefined && configDir !== '' ? configDir : join(home, '.claude')
+    rules = await Promise.all(settingsFrom(options).rules.map(async path => ({ path, text: await $.fs.read(path) })))
+    const shippedPath = join($.plugin.root, 'crew.json')
+    const ownPath = join(join(join(home, '.config'), 'crew'), 'crew.json')
+    const own = (await $.fs.exists(ownPath)) ? parseCrewFile(await $.fs.read(ownPath), ownPath) : null
+    crew = mergeCrew(parseCrewFile(await $.fs.read(shippedPath), shippedPath), own, own === null ? shippedPath : `${shippedPath} with ${ownPath} over it`)
+    jobs ??= makeJobs(join(claudeDir, 'crew'), cacheDir)
     providersInfo = await $.providers.list()
-    groups = (await $.providers.catalog()).groups
+    ;({ providers: catalog, groups } = await $.providers.catalog())
     sessionProvider = (await $.providers.sessionProvider()).provider
-    await $.tool.register({ name: 'review', description: reviewDescription(reviewable()), inputSchema: reviewSchema(reviewable().map(p => p.id)), isDeferred: false })
+    for (const [name, spec] of Object.entries(crew.jobs)) {
+      await $.tool.register({ name, description: `${spec.description}\n\n${RUNS_IN_BACKGROUND}`, inputSchema: jobSchema(spec), isDeferred: false })
+    }
+    await $.tool.register({ name: 'jobs', description: 'What crew runs now and what finished that you have not read in full, with how each agent is doing.', inputSchema: JOBS_SCHEMA, isDeferred: false })
     await $.tool.register({
-      name: 'review_continue',
-      description: 'Ask a reviewer of a finished crew review a follow-up, in its own conversation. Background by default: the answer arrives as a message.',
-      inputSchema: CONTINUE_SCHEMA,
+      name: 'report',
+      description: "Read what a crew job found: a report by scope (what system), each with its findings and references. By default the whole report, which marks it read; with `scope` that scope alone, with `findings_only` just the findings and their references, to keep it short or to skip scopes that don't concern you.",
+      inputSchema: REPORT_SCHEMA_INPUT,
+      isDeferred: false,
     })
-    await $.tool.register({
-      name: 'review_status',
-      description: "This session's crew reviews and the quota of each reviewer's provider.",
-      inputSchema: STATUS_SCHEMA,
-    })
+    await $.tool.register({ name: 'stop', description: 'Give up on a running crew job or one agent of it. What the others find is kept.', inputSchema: STOP_SCHEMA, isDeferred: false })
     await $.sidebar.register(TOOL)
     await follow($)
     ticker?.cancel()
     ticker = $.clock.every(TICK_MS, () => void tick($))
     quotaTicker?.cancel()
     quotaTicker = $.clock.every(QUOTA_MS, () => void readQuota($))
+    livenessTicker?.cancel()
+    livenessTicker = $.clock.every(LIVENESS_MS, () => void watchJobs($))
     $.clock.after(0, () => void readQuota($))
     return started
   })
@@ -615,7 +634,7 @@ export const register: Register = (on, options) => {
 
   on('agents.ended', async ($, e, next) => {
     const ended = await next(e)
-    if (reviews !== null && (await reviews.ended(ioOf($), alertOf($), e.run, e.outcome)) !== undefined) {
+    if (jobs !== null && (await jobs.ended(ioOf($), alertOf($), e.run, e.outcome)) !== undefined) {
       await syncBadge($)
       $.ui.invalidate('ui.render')
     }
@@ -647,10 +666,14 @@ export const register: Register = (on, options) => {
       switchLimits?: unknown
       stop?: { run?: unknown; key?: unknown }
       open?: { run?: unknown; agent?: unknown; group?: unknown; model?: unknown }
+      tick?: { job?: unknown; model?: unknown }
+      poke?: { job?: unknown; model?: unknown; by?: unknown }
     }
     await follow($)
     if (data.switchLimits === true) limits = await $.providers.switchLimits({ session: sessionId, isOff: liveLimits().isOn })
-    if (data.tab === 'running' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits' || data.tab === 'quota') view = { tab: data.tab, page: 0 }
+    if (data.tab === 'running' || data.tab === 'jobs' || data.tab === 'usage' || data.tab === 'log' || data.tab === 'limits' || data.tab === 'quota') view = { tab: data.tab, page: 0 }
+    if (typeof data.tick?.job === 'string' && typeof data.tick.model === 'string') await tickModel($, data.tick.job, data.tick.model)
+    if (typeof data.poke?.job === 'string' && typeof data.poke.model === 'string' && typeof data.poke.by === 'number') await movePoke($, data.poke.job, data.poke.model, data.poke.by)
     if (data.page === 1 || data.page === -1) view = { ...view, page: Math.max(0, view.page + data.page) }
     const raise = data.raise
     if (typeof raise?.pool === 'string' && (raise.role === 'main' || raise.role === 'helpers') && (RAISES_USD as readonly unknown[]).includes(raise.usd)) {
@@ -660,7 +683,7 @@ export const register: Register = (on, options) => {
       limits = await $.providers.close({ session: sessionId, gate: data.toggle, isClosed: !liveLimits().closed.includes(data.toggle) })
     }
     if (typeof data.stop?.run === 'string') {
-      await liveReviews().stop(agentsOf($), data.stop.run, typeof data.stop.key === 'string' ? data.stop.key : undefined)
+      await liveJobs().stop(agentsOf($), sessionId, data.stop.run, typeof data.stop.key === 'string' ? data.stop.key : undefined)
     }
     if (typeof data.open?.run === 'string') await open($, { run: data.open.run })
     if (typeof data.open?.agent === 'string') await open($, { agent: data.open.agent })
@@ -700,12 +723,14 @@ export const register: Register = (on, options) => {
         now,
         opened: detail?.target ?? null,
         groups,
-        reviews: sessionViews(),
+        jobs: sessionViews(),
         agents: claudeAgents.all(),
         record,
         limits: liveLimits(),
         gates: gates(),
         quota: quotaViews,
+        crew: crew.jobs,
+        sessionKey: await sessionKey($),
       })
       if (quotaError !== null) props.quota.blocks.unshift({ title: 'Quota', color: '#e06c75', rows: [], notes: [quotaError] })
       const height = Math.min(room.drawer, overviewLines(props).length)
@@ -720,11 +745,19 @@ export const register: Register = (on, options) => {
     return filled as typeof tree
   })
 
-  on('tool.call', { tool: 'mcp__cc-crew__review' }, ($, e, next) => answer(startReview($, fields(e), next.signal)))
-  on('tool.call', { tool: 'mcp__cc-crew__review_continue' }, ($, e, next) => answer(continueReview($, fields(e), next.signal)))
-  on('tool.call', { tool: 'mcp__cc-crew__review_status' }, ($, e) => answer(status($, fields(e))))
+  on('tool.call', ($, e, next) => {
+    const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...input } = fields(e)
+    const work = toolWork($, e.tool, input)
+    return work === undefined ? next(e) : answer(work)
+  })
+
+  on('turn.start', ($, e, next) => {
+    openTurns.add(e.turnId)
+    return next(e)
+  })
 
   on('turn.complete', async ($, e, next) => {
+    openTurns.delete(e.turnId)
     await follow($)
     if (e.agentId === undefined) {
       record.turns += 1

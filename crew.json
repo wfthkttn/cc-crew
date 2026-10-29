@@ -1,0 +1,46 @@
+{
+  "jobs": {
+    "review": {
+      "description": "Get an independent review of code, a change, a design or a document from other models. Brief it like a colleague who just walked into the room: it knows nothing of this conversation. Say what to review, what matters, and what you already know or suspect is out of scope.",
+      "prompt": "prompts/review.md",
+      "kind": "oneshot",
+      "web": false,
+      "helpers": false,
+      "paths": "required",
+      "diff": true,
+      "timeoutMin": 60,
+      "pokeMin": 20,
+      "stallMin": 10,
+      "models": {
+        "google/gemini-3.8-flash": {},
+        "zhipu/glm-5.3": {},
+        "anthropic/claude-sonnet-5-5": { "effort": "medium" },
+        "google/gemini-4-argon": {},
+        "openai/gpt-6.1-sol": { "effort": "medium" }
+      },
+      "default": ["google/gemini-3.8-flash", "zhipu/glm-5.3"],
+      "bySessionModel": {
+        "claude/opus": ["anthropic/claude-sonnet-5-5", "google/gemini-4-argon", "openai/gpt-6.1-sol"],
+        "claude/fable": ["anthropic/claude-sonnet-5-5", "google/gemini-4-argon", "openai/gpt-6.1-sol"]
+      }
+    },
+    "research": {
+      "description": "Get a question researched by other models: wide across sources, every claim checked at its source. Brief it like a colleague who just walked into the room: say what you need to know, why, and what you already know.",
+      "prompt": "prompts/research.md",
+      "kind": "oneshot",
+      "web": true,
+      "helpers": false,
+      "paths": "optional",
+      "diff": false,
+      "timeoutMin": 60,
+      "pokeMin": 20,
+      "stallMin": 10,
+      "models": {
+        "google/gemini-3.8-flash": {},
+        "anthropic/claude-sonnet-5-5": { "effort": "medium" },
+        "openai/gpt-6.1-sol": { "effort": "medium" }
+      },
+      "default": ["google/gemini-3.8-flash"]
+    }
+  }
+}
