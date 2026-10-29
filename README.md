@@ -14,7 +14,8 @@ Provided as is.
   [cc-providers](https://github.com/wfthkttn/cc-providers) and [cc-agents](https://github.com/wfthkttn/cc-agents).
   cc-providers runs the reviewers, so its requirements hold for them: the Codex CLI signed
   in for Codex, `agy` signed in for Antigravity, Claude Code signed in to Claude for the Claude reviewer.
-- For Telegram asks, courier (optional): without it a paused conversation is told in the terminal.
+- [cc-bus](https://github.com/wfthkttn/cc-bus). For Telegram asks, a mod that carries cc-bus's `person.ask` to the
+  person, such as cc-courier (optional): without one a paused conversation is told in the terminal.
 
 ## Install
 
@@ -78,7 +79,8 @@ the conversation past its own is paused but for turns the person starts. In Limi
 the limits off, or switch providers and Claude agents off. These hold for the session.
 
 When the conversation is paused in a pool, the tab's badge turns red and crew asks on Telegram whether to raise its
-limit by $1 or $10 or keep it paused; without courier the terminal and the thread get a notice.
+limit by $1 or $10 or keep it paused; with nobody to carry the ask, or a thread that is off, the terminal and the
+thread get a notice. An answer that arrives after crew reloaded is still acted on.
 
 The tab draws the quota of the first three providers that read or meter one as bars, the short window beside the
 weekly one; the Quota tab lists every window of every pool.

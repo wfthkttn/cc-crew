@@ -1,5 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { SidebarDrawerSlot, SidebarModalSlot, SidebarRowComponent } from 'cc-sidebar'
+import type { BusPersonAnswered } from 'cc-bus'
 import type { ProvidersGroup, ProvidersInfo, ProvidersLimitReached, ProvidersLimits } from 'cc-providers'
 
 import { ClaudeAgents } from './agents.ts'
@@ -149,7 +150,7 @@ let sessionProvider = ''
 /** Set at session start and read again every tick. */
 let limits: ProvidersLimits | null = null
 type Ask = { session: string; key: string; pool: string }
-/** The Telegram ask about a paused pool, open until answered, the pause ends or the session moves on. */
+/** The person's ask about a paused pool, open until answered, the pause ends or the session moves on. */
 let openAsk: Ask | null = null
 /** Puts up one ask at a time, so the ask a newer one replaces is always cancelled. */
 let asking: Promise<unknown> = Promise.resolve()
@@ -272,15 +273,9 @@ async function tick($: EngineInterface): Promise<void> {
   await follow($)
   claudeAgents.refresh(await $.agent.list())
   limits = await $.providers.limits({ session: sessionId })
-  if (openAsk !== null && openAsk.session !== sessionId) {
-    const ask = openAsk
-    openAsk = null
-    await $.courier.cancel({ key: ask.key, reason: 'That conversation ended: a /clear or a resume started another.' })
-  }
+  if (openAsk !== null && openAsk.session !== sessionId) await closeAsk($, 'That conversation ended: a /clear or a resume started another.')
   if (openAsk !== null && !limits.pools.some(p => p.pool === openAsk?.pool && p.pausedAt !== null)) {
-    const ask = openAsk
-    openAsk = null
-    await $.courier.cancel({ key: ask.key, reason: 'The pause ended: its limit was raised or the limits were switched off.' })
+    await closeAsk($, 'The pause ended: its limit was raised or the limits were switched off.')
   }
   await syncBadge($)
   if ((await $.sidebar.selected({})) !== TAB_ID) return
@@ -478,70 +473,89 @@ function answer(work: Promise<string>) {
   )
 }
 
-/** What a Telegram ask came to: the label pressed, or why none was. */
-type Asked = { picked: string } | { picked: undefined; why: 'not enabled' | 'closed' | 'courier not loaded' }
+const KEEP_PAUSED = 'Keep paused'
+const LABELS = [...RAISES_USD.map(n => `+$${n}`), KEEP_PAUSED]
+const ASK_PREFIX = 'crew-limit:'
 
-const isCourierMissing = (err: unknown) => err instanceof TypeError && err.message.includes('$.courier')
-
-/** Shows `text` with one button per label in the session's thread and waits for a press. A failure other than a missing courier rejects. */
-async function askChoice($: EngineInterface, ask: Ask, text: string, labels: string[]): Promise<Asked> {
-  const key = ask.key
-  try {
-    const put = asking.then(async () => {
-      if (openAsk !== null) await $.courier.cancel({ key: openAsk.key, reason: 'Replaced by a newer ask.' })
-      openAsk = null
-      await $.courier.ask({ key, thread: `cc:${ask.session}`, questions: [{ id: 'action', text, options: labels.map(label => ({ label })) }] })
-      const delivered = await $.courier.deliver({ key, group: 'attention' })
-      if (delivered.state !== 'held') openAsk = ask
-      return delivered
-    })
-    // its failure is this caller's; the next ask still goes up
-    asking = put.catch(() => undefined)
-    let shown = await put
-    if (shown.state === 'held') {
-      await $.courier.cancel({ key, reason: 'The thread is not enabled.' })
-      return { picked: undefined, why: 'not enabled' }
-    }
-    while (shown.state === 'delivered' && openAsk?.key === key) shown = await $.courier.wait({ key, known: 'delivered' })
-    if (shown.state !== 'answered' || openAsk?.key !== key) return { picked: undefined, why: 'closed' }
-    openAsk = null
-    const picked = shown.answers['action']?.selected[0]
-    if (picked === undefined || !labels.includes(picked)) throw new Error(`the answer ${JSON.stringify(picked)} is none of ${labels.join(', ')}`)
-    return { picked }
-  } catch (err) {
-    if (isCourierMissing(err)) return { picked: undefined, why: 'courier not loaded' }
-    throw err
-  }
+/** The session and pool a pause ask's key names, so an answer after a reload is still acted on. */
+function askOf(key: string): Ask {
+  const [session, pool] = key.slice(ASK_PREFIX.length).split(':')
+  if (session === undefined || pool === undefined) throw new Error(`crew: the ask key ${key} names no session and pool`)
+  return { session, key, pool }
 }
 
-const KEEP_PAUSED = 'Keep paused'
+type Pause = { name: string; spentUsd: number; limitUsd: number }
+
+const pauseText = (p: Pause) =>
+  `Paused: this conversation spent ${usd(p.spentUsd)} in the ${p.name} pool at API prices, past its limit of ${usd(p.limitUsd)}. It goes on in turns you start; a raise lets it go on by itself.`
+
+/** Where nobody carries the ask to the person: the terminal, and the thread for whoever carries notices there. */
+async function notice($: EngineInterface, text: string): Promise<void> {
+  await $.conversation.tell({ text: `crew: ${text}`, group: 'attention' })
+  await $.ui.toast(`crew: ${text}`)
+}
+
+async function closeAsk($: EngineInterface, reason: string): Promise<void> {
+  if (openAsk === null) return
+  const ask = openAsk
+  openAsk = null
+  await $.bus.tell({ topic: 'person.close', key: ask.key, reason })
+}
 
 /**
- * Asks the person on Telegram whether to let the paused conversation go on, and raises its limit by what they press;
- * asks again while a raise leaves it paused. Without Telegram the terminal and the thread get a notice instead.
+ * Asks the person away from the terminal whether to let the paused conversation go on; their answer comes as
+ * `person.answered`. Nobody carrying it, the terminal and the thread get a notice instead.
  */
 async function askRaise($: EngineInterface, session: string, reached: Pick<ProvidersLimitReached, 'pool' | 'name' | 'spentUsd' | 'limitUsd' | 'at'>): Promise<void> {
-  const text = `Paused: this conversation spent ${usd(reached.spentUsd)} in the ${reached.name} pool at API prices, past its limit of ${usd(reached.limitUsd)}. It goes on in turns you start; a raise lets it go on by itself.`
-  const labels = [...RAISES_USD.map(n => `+$${n}`), KEEP_PAUSED]
-  const asked = await askChoice($, { session, key: `crew-limit:${session}:${reached.pool}:${reached.at}`, pool: reached.pool }, text, labels)
-  if (asked.picked === undefined) {
-    if (asked.why === 'closed') return
-    await $.conversation.tell({ text: `crew: ${text}`, group: 'attention' })
-    await $.ui.toast(`crew: ${text}`)
+  const text = pauseText(reached)
+  const ask: Ask = { session, key: `${ASK_PREFIX}${session}:${reached.pool}:${reached.at}`, pool: reached.pool }
+  const put = asking.then(async () => {
+    await closeAsk($, 'Replaced by a newer ask.')
+    const { answers } = await $.bus.ask({ topic: 'person.ask', key: ask.key, questions: [{ id: 'action', text, options: LABELS.map(label => ({ label })) }] })
+    const isCarried = answers.some(a => a.topic === 'person.ask' && a.key === ask.key)
+    if (isCarried) openAsk = ask
+    return isCarried
+  })
+  // its failure is this caller's; the next ask still goes up
+  asking = put.catch(() => undefined)
+  if (!(await put)) await notice($, text)
+}
+
+/**
+ * Raises the limit by what the person pressed, and asks again while the raise leaves the conversation paused; one
+ * they never saw becomes a notice.
+ */
+async function answered($: EngineInterface, e: BusPersonAnswered): Promise<void> {
+  if (openAsk?.key === e.key) openAsk = null
+  const ask = askOf(e.key)
+  const paused = (await $.providers.limits({ session: ask.session })).pools.find(p => p.pool === ask.pool && p.pausedAt !== null)
+  if (!('answers' in e)) {
+    if (!e.wasShown && paused !== undefined && paused.main.limitUsd !== null) await notice($, pauseText({ ...paused, spentUsd: paused.main.spentUsd, limitUsd: paused.main.limitUsd }))
     return
   }
-  if (asked.picked === KEEP_PAUSED) return
+  const picked = e.answers['action']?.selected[0]
+  if (picked === undefined || !LABELS.includes(picked)) throw new Error(`the answer ${JSON.stringify(picked)} is none of ${LABELS.join(', ')}`)
   // a raise in the tab can land before the press does
-  const now = await $.providers.limits({ session })
-  if (!now.pools.some(p => p.pool === reached.pool && p.pausedAt !== null)) return
-  const raised = await $.providers.raise({ session, pool: reached.pool, role: 'main', usd: Number(asked.picked.slice(2)) })
-  if (session === sessionId) {
+  if (picked === KEEP_PAUSED || paused === undefined) return
+  const raised = await $.providers.raise({ session: ask.session, pool: ask.pool, role: 'main', usd: Number(picked.slice(2)) })
+  if (ask.session === sessionId) {
     limits = raised
     await syncBadge($)
   }
-  const pool = raised.pools.find(p => p.pool === reached.pool)
+  const pool = raised.pools.find(p => p.pool === ask.pool)
   if (pool?.pausedAt === null || pool === undefined || pool.main.limitUsd === null) return
-  await askRaise($, session, { pool: reached.pool, name: pool.name, spentUsd: pool.main.spentUsd, limitUsd: pool.main.limitUsd, at: await $.clock.now() })
+  await askRaise($, ask.session, { pool: ask.pool, name: pool.name, spentUsd: pool.main.spentUsd, limitUsd: pool.main.limitUsd, at: await $.clock.now() })
+}
+
+/** Runs the pause work in the background, past a noun call's 10 s; a failure is shown, not swallowed. */
+function pauseWork($: EngineInterface, what: string, work: () => Promise<void>): void {
+  $.clock.after(0, () =>
+    void work().catch(async (err: unknown) => {
+      const why = `crew: ${what} failed: ${err instanceof Error ? err.message : String(err)}`
+      $.ui.log(why, { to: 'debug' })
+      await $.ui.toast(why)
+    }),
+  )
 }
 
 export const register: Register = (on, options) => {
@@ -614,16 +628,14 @@ export const register: Register = (on, options) => {
     if (e.session === sessionId) {
       limits = await $.providers.limits({ session: sessionId })
       await syncBadge($)
-      // a noun call is cut at 10 s; the ask waits on the person
-      $.clock.after(0, () =>
-        void askRaise($, e.session, e).catch(async (err: unknown) => {
-          const why = `crew: asking about the pause in ${e.name} failed: ${err instanceof Error ? err.message : String(err)}`
-          $.ui.log(why, { to: 'debug' })
-          await $.ui.toast(why)
-        }),
-      )
+      pauseWork($, `asking about the pause in ${e.name}`, () => askRaise($, e.session, e))
     }
     return reached
+  })
+
+  on('bus.tell', { topic: 'person.answered' }, async ($, e, next) => {
+    if (e.key.startsWith(ASK_PREFIX)) pauseWork($, 'acting on the answer about a pause', () => answered($, e))
+    return next(e)
   })
 
   on('ui.message', { element: OVERVIEW_KEY }, async ($, e, next) => {
