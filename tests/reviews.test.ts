@@ -37,12 +37,12 @@ function setup(o: { refuseStart?: Record<string, string>; refuse?: Record<string
   return { io, agents, providers, alerts, alert, reviews: makeReviews(CACHE) }
 }
 
-test("a review starts each reviewer through agents, grouped by the review and labelled by its key, with crew's findings schema and the hour-long cache", async () => {
+test("a review starts each reviewer through agents, grouped by the review and labelled by its key, with crew's findings schema and the five-minute cache", async () => {
   const { io, agents, providers, alert, reviews } = setup()
   const review = await reviews.begin(io, agents.port, providers, alert, input())
   expect(review.reviewers.map(r => [r.key, r.agent])).toEqual([['codex-default', 'a1'], ['claude-opus', 'a2'], ['codex-default-2', 'a3']])
   expect(agents.started.map(s => [s.provider, s.group, s.label])).toEqual([['codex', review.id, 'codex-default'], ['claude', review.id, 'claude-opus'], ['codex', review.id, 'codex-default-2']])
-  expect(agents.started[1]!.job).toMatchObject({ dir: `${CACHE}/runs/${review.id}/claude-opus`, read: 'project', project: PROJECT, system: 'SYSTEM', model: 'opus', schema: FINDINGS_SCHEMA, cacheTtl: '1h', timeoutMs: 60_000 })
+  expect(agents.started[1]!.job).toMatchObject({ dir: `${CACHE}/runs/${review.id}/claude-opus`, read: 'project', project: PROJECT, system: 'SYSTEM', model: 'opus', schema: FINDINGS_SCHEMA, cacheTtl: '5m', timeoutMs: 60_000 })
   expect(agents.started[0]!.job.task).toContain(`You may read: \`${PROJECT}\`. Web: not available.`)
   expect(review.reportDir).toBe(`${PROJECT}/.claude/work/reviews/${review.id}-check-x`)
   expect(io.files.get(`${review.reportDir}/brief.md`)).toContain('## Brief\n\nLook at X.')

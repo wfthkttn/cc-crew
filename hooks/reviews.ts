@@ -322,8 +322,8 @@ export function makeReviews(cacheDir: string) {
             ...(entry.model !== undefined ? { model: entry.model } : {}),
             ...(entry.effort !== undefined ? { effort: entry.effort } : {}),
             schema: FINDINGS_SCHEMA,
-            // reviewers get follow-ups, often past five minutes
-            cacheTtl: '1h',
+            // 5m set outright: on a subscription a claude -p run writes the hour-long cache unless told otherwise
+            cacheTtl: '5m',
             timeoutMs: input.timeoutMs,
           }
           let run: AgentsRun

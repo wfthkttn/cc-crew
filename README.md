@@ -51,8 +51,8 @@ each reviewer. A custom `report_dir` must remain under `<project>/.claude/work/`
 findings, what was checked and what was not read when the reviewer returns the requested structure.
 
 `mcp__cc-crew__review_continue` sends a follow-up to one finished reviewer in its own conversation, from the session
-that started the review. Reviewers write the hour-long prompt cache where their harness can choose it, so a
-follow-up within the hour reads it cheaply; the summary says until when each is warm.
+that started the review. Reviewers write the five-minute prompt cache where their harness can choose it, so a
+follow-up within five minutes reads it cheaply; the summary says until when each is warm.
 `mcp__cc-crew__review_status` reports runs and the quota of each reviewer's provider.
 
 ### Read limits

@@ -24,7 +24,7 @@ Each reviewer reads only what \`read\` allows (the project by default), secret f
 
 Brief it like a colleague who just walked into the room: the reviewers know nothing of this conversation. Say what to review, what matters, what you already know or suspect is out of scope. With \`changes\`, the diff is put in front of every reviewer.
 
-Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out, out of quota or past its limit is reported loudly and the others carry on. A reviewer's cache stays warm for an hour after it answers, so a follow-up within it is cheap; the summary says until when.`
+Reports land in \`report_dir\` (default \`<project>/.claude/work/reviews\`), one folder per run, \`<provider>-<model>.md\` per reviewer. A reviewer that is signed out, out of quota or past its limit is reported loudly and the others carry on. A reviewer's cache stays warm for five minutes after it answers, so a follow-up within them is cheap; the summary says until when.`
 
 const MODEL_NOTES: Record<string, string> = {
   codex: 'codex takes its own model names and effort low|medium|high|xhigh|max|ultra',
