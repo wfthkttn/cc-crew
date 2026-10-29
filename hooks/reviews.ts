@@ -289,7 +289,7 @@ export function makeReviews(cacheDir: string) {
         const repo = first?.roots[0]
         if (first === undefined || repo === undefined) throw new Refused('changes needs a read path holding the repository')
         const secretsOf = async (paths: string[]) => (await providers.secretPaths({ paths })).secret
-        change = await changeOf(io, folderOf(repo, first.files), input.changes, secretsOf)
+        change = await changeOf(io, folderOf(repo, first.files), roots, input.changes, secretsOf)
       }
       const id = await newId(io)
       const keys = keysFor(input.specs)

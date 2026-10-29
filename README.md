@@ -64,7 +64,8 @@ Web access and helper agents are off by default. `web: true` permits web access;
 Antigravity reviewers to run helpers. Web access lets a reviewer send information from the files it reads to a URL.
 
 `changes` adds a Git diff to the brief: `"uncommitted"`, `{ "base": "<branch>" }` or `{ "commit": "<sha>" }`.
-It uses the repository of the first read path the call names; files cc-providers marks secret are left out of it.
+It uses the repository of the first read path the call names, and only the changes under the read paths; files
+cc-providers marks secret are left out of it.
 
 ### Sidebar, limits and quota
 

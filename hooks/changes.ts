@@ -1,6 +1,6 @@
 import type { Io } from './io.ts'
 
-import { join } from './paths.ts'
+import { isInside, join } from './paths.ts'
 
 export type ChangeSpec = 'uncommitted' | { base: string } | { commit: string }
 
@@ -26,8 +26,14 @@ async function withoutSecrets(repo: string, paths: string[], secretsOf: SecretsO
   return paths.filter(p => !secret.has(join(repo, p)))
 }
 
-/** The change as a diff, secret files left out by name. */
-export async function changeOf(io: Io, repo: string, spec: ChangeSpec, secretsOf: SecretsOf): Promise<Change> {
+/**
+ * The change in the repository that holds `folder`, kept to the `scope` paths inside it, so a reviewer is shown no
+ * change outside what it may read; secret files left out by name.
+ */
+export async function changeOf(io: Io, folder: string, scope: readonly string[], spec: ChangeSpec, secretsOf: SecretsOf): Promise<Change> {
+  // from its top: from a subfolder git names changed files from the top but untracked ones from the subfolder
+  const repo = (await git(io, folder, ['rev-parse', '--show-toplevel'])).trim()
+  const within = ['--', ...scope.filter(p => isInside(p, repo))]
   let label: string
   let range: string[]
   let changed: string[]
@@ -35,18 +41,18 @@ export async function changeOf(io: Io, repo: string, spec: ChangeSpec, secretsOf
   if (spec === 'uncommitted') {
     label = `The uncommitted changes (staged and unstaged) in \`${repo}\``
     range = ['diff', 'HEAD']
-    changed = names(await git(io, repo, ['diff', 'HEAD', '--name-only']))
-    untracked = await withoutSecrets(repo, names(await git(io, repo, ['ls-files', '--others', '--exclude-standard'])), secretsOf)
+    changed = names(await git(io, repo, ['diff', 'HEAD', '--name-only', ...within]))
+    untracked = await withoutSecrets(repo, names(await git(io, repo, ['ls-files', '--others', '--exclude-standard', ...within])), secretsOf)
   } else if ('base' in spec) {
     const mergeBase = (await git(io, repo, ['merge-base', 'HEAD', spec.base])).trim()
     label = `The changes on this branch of \`${repo}\` since it left \`${spec.base}\` (merge base ${mergeBase.slice(0, 12)})`
     range = ['diff', mergeBase]
-    changed = names(await git(io, repo, ['diff', mergeBase, '--name-only']))
+    changed = names(await git(io, repo, ['diff', mergeBase, '--name-only', ...within]))
   } else {
     const title = (await git(io, repo, ['show', '-s', '--format=%h %s', spec.commit])).trim()
     label = `Commit ${title} in \`${repo}\``
     range = ['show', '--format=%H %s%n%n%b', spec.commit]
-    changed = names(await git(io, repo, ['show', '--name-only', '--format=', spec.commit]))
+    changed = names(await git(io, repo, ['show', '--name-only', '--format=', spec.commit, ...within]))
   }
   const kept = await withoutSecrets(repo, changed, secretsOf)
   const left = changed.length - kept.length

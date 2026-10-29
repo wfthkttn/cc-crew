@@ -168,8 +168,9 @@ test('a change is read in the first read path the call names, though the paths r
     run: argv => {
       if (argv[2] !== '/r/zeta') throw new Error(`git ran in ${argv[2]}`)
       const args = argv.slice(3).join(' ')
-      if (args === 'diff HEAD --name-only') return ok('a.ts\n')
-      if (args === 'ls-files --others --exclude-standard') return ok('')
+      if (args === 'rev-parse --show-toplevel') return ok('/r/zeta\n')
+      if (args === 'diff HEAD --name-only -- /r/zeta') return ok('a.ts\n')
+      if (args === 'ls-files --others --exclude-standard -- /r/zeta') return ok('')
       if (args === 'diff HEAD -- a.ts') return ok('+a\n')
       throw new Error(`unexpected git ${args}`)
     },
@@ -185,8 +186,9 @@ test("a change's diff leaves out the files whose names providers marks secret", 
   const io = fakeIo({
     run: argv => {
       const args = argv.slice(3).join(' ')
-      if (args === 'diff HEAD --name-only') return ok('main.ts\n.env\n')
-      if (args === 'ls-files --others --exclude-standard') return ok('new.ts\nkey.pem\n')
+      if (args === 'rev-parse --show-toplevel') return ok(`${PROJECT}\n`)
+      if (args === `diff HEAD --name-only -- ${PROJECT}`) return ok('main.ts\n.env\n')
+      if (args === `ls-files --others --exclude-standard -- ${PROJECT}`) return ok('new.ts\nkey.pem\n')
       if (args === 'diff HEAD -- main.ts') return ok('+fix\n')
       throw new Error(`unexpected git ${args}`)
     },
@@ -199,6 +201,26 @@ test("a change's diff leaves out the files whose names providers marks secret", 
   expect(task).toContain('- new.ts')
   expect(task).not.toContain('key.pem')
   expect(task).toContain('```diff\n+fix\n\n```')
+})
+
+test("a change is kept to the read paths: a file read path shows that file's change, not its folder's or the repository's", async () => {
+  const allowed = '/r/src/allowed.ts'
+  const io = fakeIo({
+    run: argv => {
+      const args = argv.slice(3).join(' ')
+      if (args === 'rev-parse --show-toplevel') return ok('/r\n')
+      if (argv[2] !== '/r') throw new Error(`git ran in ${argv[2]} after the top was found`)
+      if (args === `diff HEAD --name-only -- ${allowed}`) return ok('src/allowed.ts\n')
+      if (args === `ls-files --others --exclude-standard -- ${allowed}`) return ok('')
+      if (args === 'diff HEAD -- src/allowed.ts') return ok('+ok\n')
+      throw new Error(`unexpected git ${args}`)
+    },
+  })
+  const providers = fakeProviders({ roots: { roots: [allowed], files: [allowed] } })
+  const agents = fakeAgents()
+  const review = await makeReviews(CACHE).begin(io, agents.port, providers, async () => undefined, input({ specs: [{ provider: 'codex' }], read: [allowed], changes: 'uncommitted' }))
+  expect(review.changes).toBe('The uncommitted changes (staged and unstaged) in `/r`')
+  expect(agents.started[0]!.job.task).toContain('```diff\n+ok\n\n```')
 })
 
 test("a reload finds the session's reviews on disk with their reviewers' runs; stop reaches only reviewers still running", async () => {
