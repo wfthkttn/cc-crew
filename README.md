@@ -11,7 +11,8 @@ Provided as is.
 
 - Claude Code 2.1.296 or later. The sidebar needs fullscreen rendering; outside fullscreen nothing is drawn.
 - [cc-sidebar](https://github.com/wfthkttn/cc-sidebar), [cc-conversation](https://github.com/wfthkttn/cc-conversation),
-  cc-providers and cc-agents. cc-providers runs the reviewers, so its requirements hold for them: the Codex CLI signed
+  [cc-providers](https://github.com/wfthkttn/cc-providers) and [cc-agents](https://github.com/wfthkttn/cc-agents).
+  cc-providers runs the reviewers, so its requirements hold for them: the Codex CLI signed
   in for Codex, `agy` signed in for Antigravity, Claude Code signed in to Claude for the Claude reviewer.
 - For Telegram asks, courier (optional): without it a paused conversation is told in the terminal.
 
