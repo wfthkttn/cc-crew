@@ -2,11 +2,19 @@ import { expect, test } from 'claude-code/testing'
 
 import { checkJobs, effective, mergeCrew, modelsFor, parseCrewFile, settingsFrom } from '../hooks/config.ts'
 import { readingOf } from '../hooks/liveness.ts'
-import { systemPrompt, taskText } from '../hooks/prompt.ts'
+import { systemPrompt, taskText, toolDescription } from '../hooks/prompt.ts'
 import { fullReport, merge, parseAnswer, scopeList, scopeReport } from '../hooks/report.ts'
 import { ANSWER } from './fake-io.ts'
 
 const PROJECT = '/home/u/Projects/p'
+
+test("a job's tool says what its agents may do by the job's own profile", () => {
+  expect(toolDescription('Do it.', false).startsWith('Do it.\n\n')).toBe(true)
+  expect(toolDescription('Do it.', false)).toContain('and they change nothing.')
+  expect(toolDescription('Do it.', true)).toContain('and they may change those paths.')
+  expect(toolDescription('Do it.', true)).not.toContain('change nothing')
+  expect(toolDescription('Do it.', undefined)).toContain('cc-agents has no such profile, so a call is refused.')
+})
 
 test('an answer is read from bare JSON or JSON inside prose; anything else is no answer', () => {
   expect(parseAnswer(JSON.stringify(ANSWER))?.scopes).toHaveLength(2)

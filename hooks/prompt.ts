@@ -10,6 +10,14 @@ export function systemPrompt(jobPrompt: string, rules: readonly Rule[]): string 
   return `${base}\n\n## Rules from the person you work for\n\n${parts.join('\n\n')}`
 }
 
+/** A job's tool description; `write` is its profile's, undefined when cc-agents has no such profile. */
+export function toolDescription(description: string, write: boolean | undefined): string {
+  const access = write === undefined ? 'cc-agents has no such profile, so a call is refused' : write ? 'they may change those paths' : 'they change nothing'
+  return `${description}
+
+It runs in the background: you get its id at once, and a message when it finishes or an agent behind it stalls. That message wakes you, so go on with other work. Its agents know nothing of this conversation, so the brief carries what they need. They reach only the paths you name, secret files stay closed to them, and ${access}. Use \`report\` instead of opening its files: it reads by scope and marks the job read.`
+}
+
 export type TaskInput = {
   brief: string
   roots: readonly string[]

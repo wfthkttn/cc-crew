@@ -12,7 +12,7 @@ import { type Alert, type AgentsPort, type Job, type Jobs, makeJobs, type Provid
 import { OVERVIEW_COLUMNS, overviewLines } from './overview.ts'
 import type { Role, Tab, Target } from './overview-props.ts'
 import { join } from './paths.ts'
-import { systemPrompt } from './prompt.ts'
+import { systemPrompt, toolDescription } from './prompt.ts'
 import { gaugeColumns, type QuotaView } from './quota.ts'
 import { emptyRecord, loadRecord, recordPath, saveRecord, type SessionRecord } from './record.ts'
 import { fillSlot, hasSlot } from './slot.ts'
@@ -21,7 +21,6 @@ import { type Badge, type Pools, RAISES_USD, agentDetail, badgeOf, itemsOf, jobD
 
 const PREFIX = 'mcp__cc-crew__'
 
-const RUNS_IN_BACKGROUND = `It runs in the background: you get its id at once, and a message when it finishes, or when an agent behind it stalls. Do not poll or wait for it. Agents read only the paths you name, secret files are always closed to them, and they change nothing. Read the result with \`report\`, not from files.`
 /** Ends a refusal the calling agent can do nothing about. */
 const FOR_THE_PERSON = 'The call was fine: this is how crew is set up, so tell the person. Retrying will not help.'
 const JOB_ID = 'The id its start or `jobs` gave, <job>-<n>; from an earlier session, <session>/<job>-<n>'
@@ -676,10 +675,10 @@ async function startCrew($: EngineInterface, ruleFiles: readonly string[]): Prom
   cacheDir = join(join(home, '.cache'), 'crew')
   const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
   jobs ??= makeJobs(join(configDir !== undefined && configDir !== '' ? configDir : join(home, '.claude'), 'crew'))
-  await $.tool.register({ name: 'jobs', description: 'What crew runs now and what finished that you have not read in full, with how each agent is doing.', inputSchema: JOBS_SCHEMA, isDeferred: false })
+  await $.tool.register({ name: 'jobs', description: "List what crew runs now and what finished unread, with how each agent is doing. A finish reaches you as a message, so call this when you need a job's standing or id.", inputSchema: JOBS_SCHEMA, isDeferred: false })
   await $.tool.register({
     name: 'report',
-    description: "Read what a crew job found: a report by scope (what system), each with its findings and references. By default the whole report, which marks it read; with `scope` that scope alone, with `findings_only` just the findings and their references, to keep it short or to skip scopes that don't concern you.",
+    description: 'Read what a crew job found, grouped by scope, the system a finding is about. Only the whole report marks the job read and takes it off `jobs`; `scope` reads one scope and `findings_only` the findings and their references.',
     inputSchema: REPORT_SCHEMA_INPUT,
     isDeferred: false,
   })
@@ -695,8 +694,9 @@ async function startCrew($: EngineInterface, ruleFiles: readonly string[]): Prom
   providersInfo = await $.providers.list()
   ;({ providers: catalog, groups } = await $.providers.catalog())
   sessionProvider = (await $.providers.sessionProvider()).provider
+  const profiles = await $.agents.profiles()
   for (const [name, spec] of Object.entries(crew.jobs)) {
-    await $.tool.register({ name, description: `${spec.description}\n\n${RUNS_IN_BACKGROUND}`, inputSchema: jobSchema(spec), isDeferred: false })
+    await $.tool.register({ name, description: toolDescription(spec.description, profiles[spec.profile]?.write), inputSchema: jobSchema(spec), isDeferred: false })
   }
   await $.sidebar.register(TOOL)
   await follow($)
