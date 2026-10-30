@@ -42,6 +42,17 @@ export function wrap(text: string, width: number): string[] {
   return out
 }
 
+/** One page of the text, wrapped to the modal's width: the rows it has less the title row and, when it pages, the row of page buttons. */
+export function detailProps(title: string, text: string, room: { rows: number; columns: number }, page: number): DetailProps {
+  const lines = wrap(text, room.columns)
+  const isOnePage = lines.length <= room.rows - 1
+  const size = isOnePage ? lines.length : Math.max(1, room.rows - 2)
+  const pages = Math.max(1, Math.ceil(lines.length / size))
+  const at = Math.min(page, pages - 1)
+  const shown = lines.slice(at * size, at * size + size)
+  return { title, lines: shown, columns: room.columns, page: at, pages, first: at * size + 1, last: at * size + shown.length, total: lines.length }
+}
+
 type Press = { close: true } | { page: 1 | -1 }
 
 /** What a press at `x`, `y` asks for: Close on the title row, Up and Down on the last row when there are pages. */

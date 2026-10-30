@@ -1,5 +1,5 @@
 import type { FsEntry, ProcessRunResult } from 'claude-code'
-import type { AgentsActivity, AgentsJob, AgentsOutcome, AgentsRun } from 'cc-agents'
+import type { AgentsHealth, AgentsOutcome, AgentsRun } from 'cc-agents'
 
 import type { Io } from '../hooks/io.ts'
 import type { AgentsPort, ProvidersPort } from '../hooks/jobs.ts'
@@ -73,36 +73,47 @@ export const ok = (stdout = '', stderr = '', exitCode = 0): ProcessRunResult => 
   isStderrTruncated: false,
 })
 
-type Started = { session: string; provider: string; kind: string; job: Omit<AgentsJob, 'cacheTtl'>; group: string; label: string }
+/** Where the fake places a model by its vendor, unless the call pins a provider. */
+const PLACES: Record<string, string> = { google: 'antigravity', openai: 'codex', anthropic: 'claude', zhipu: 'zai' }
 
-/** `$.agents` as crew calls it: each start is kept running until the test ends it; `refuse` answers a provider's start ended at its limit. */
-export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
+/**
+ * `$.agents` as crew calls it: each start is kept running until the test ends it; `refuse` answers a provider's start
+ * ended at its limit, `unreachable` the run ids nothing here holds, so stopping them stops nothing.
+ */
+export function fakeAgents(o: { refuse?: Record<string, string>; unreachable?: string[] } = {}) {
   const runs = new Map<string, AgentsRun>()
-  const started: Started[] = []
+  const outcomes = new Map<string, AgentsOutcome>()
+  const started: Parameters<AgentsPort['start']>[0][] = []
   const followed: { session: string; id: string; message: string }[] = []
   const stopped: string[] = []
-  const activities = new Map<string, AgentsActivity | null>()
+  const healths = new Map<string, AgentsHealth | null>()
   const port: AgentsPort = {
     async start(input) {
       started.push(input)
       const id = `a${runs.size + 1}`
-      const refused = o.refuse?.[input.provider]
+      const provider = input.provider ?? PLACES[input.serves.slice(0, input.serves.indexOf('/'))] ?? 'other'
+      const model = input.serves.slice(input.serves.indexOf('/') + 1)
+      const key = `${provider}/${model}` as const
+      const refused = o.refuse?.[provider]
       const run: AgentsRun = {
         id,
         session: input.session,
-        group: input.group,
-        label: input.label,
-        provider: input.provider,
-        key: `${input.provider}/${input.job.model ?? 'default'}`,
+        ...(input.group === undefined ? {} : { group: input.group }),
+        ...(input.label === undefined ? {} : { label: input.label }),
+        serves: input.serves,
+        provider,
+        key,
         kind: input.kind,
-        job: input.job,
+        profile: input.profile,
+        job: { ...input.job, dir: `/agents/work/${id}`, write: false, model, cacheTtl: '5m' },
         status: refused === undefined ? 'running' : 'limit',
-        costUsd: 0,
-        isCostEstimate: false,
+        attempts: refused === undefined ? [] : [{ kind: 'start', key, status: 'limit', at: 0 }],
+        spent: {},
         followUps: 0,
         startedAt: 0,
         ...(refused === undefined ? { current: id } : { detail: refused, isRefused: true, endedAt: 0 }),
       }
+      if (refused !== undefined) outcomes.set(id, { status: 'limit', text: '', model, detail: refused })
       runs.set(id, run)
       return run
     },
@@ -116,10 +127,10 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
     },
     async stop({ id }) {
       stopped.push(id)
-      return { isStopping: true }
+      return { isStopping: o.unreachable?.includes(id) !== true }
     },
-    async activity({ id }) {
-      return activities.get(id) ?? null
+    async health({ id }) {
+      return healths.get(id) ?? null
     },
     async get({ id }) {
       const run = runs.get(id)
@@ -129,34 +140,34 @@ export function fakeAgents(o: { refuse?: Record<string, string> } = {}) {
     async list({ session }) {
       return [...runs.values()].filter(r => r.session === session)
     },
+    async outcome({ id }) {
+      return outcomes.get(id) ?? null
+    },
   }
-  /** The run as `agents.ended` carries it once it ended with `outcome`. */
+  /** The run as `agents.ended` carries it once it ended with `outcome`, a follow-up's message on its last attempt. */
   function end(id: string, outcome: AgentsOutcome, extra: Partial<AgentsRun> = {}): AgentsRun {
     const { current: _c, ...rest } = runs.get(id)!
+    const message = followed.findLast(f => f.id === id)?.message
     const run: AgentsRun = {
       ...rest,
       status: outcome.status,
       usedModel: outcome.model,
       endedAt: 60_000,
+      attempts: [...rest.attempts, { kind: rest.followUps === 0 ? 'start' : 'followUp', key: rest.key, status: outcome.status, at: 60_000, ...(rest.followUps === 0 || message === undefined ? {} : { message }) }],
       ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
       ...(outcome.continueId === undefined ? {} : { continueId: outcome.continueId }),
       ...extra,
     }
     runs.set(id, run)
+    outcomes.set(id, outcome)
     return run
   }
-  return { port, runs, started, followed, stopped, activities, end }
+  return { port, runs, outcomes, started, followed, stopped, healths, end }
 }
 
-/** `$.providers` as crew calls it once it picked: the project as the root, refusals by provider, secrets by name. */
-export function fakeProviders(o: { refuse?: Record<string, string>; roots?: { roots: string[]; files: string[] } } = {}): ProvidersPort & { asked: string[] } {
-  const asked: string[] = []
+/** `$.providers` as crew calls it for a job's paths: the project as the root, secrets by name. */
+export function fakeProviders(o: { roots?: { roots: string[]; files: string[] } } = {}): ProvidersPort {
   return {
-    asked,
-    refusal: async ({ key }) => {
-      asked.push(key)
-      return { refusal: o.refuse?.[key.slice(0, key.indexOf('/'))] ?? null }
-    },
     roots: async ({ read, project }) => o.roots ?? { roots: read === 'none' ? [] : [project], files: [] },
     secretPaths: async ({ paths }) => ({ secret: paths.filter(p => /\/\.env(\.[^/]*)?$|\.pem$/.test(p)) }),
   }

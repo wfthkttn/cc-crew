@@ -6,6 +6,7 @@ export const OVERVIEW_COLUMNS = 64
 
 const TEXT = '#e8ecf4'
 const MUTED = '#6b7280'
+const PROBLEM = '#e06c75'
 const HEADING = '#d97757'
 const RUNNING = '#5b9bf0'
 const BUTTON = '#24324a'
@@ -118,7 +119,8 @@ const MODEL_COLUMNS = 30
 
 /** Each job's models: a tick per model, and its poke with a step down and up. */
 function jobsLines(props: JobsProps): Line[] {
-  const lines: Line[] = []
+  const lines: Line[] = props.problems.map(text => [{ text, color: PROBLEM }])
+  if (lines.length > 0) lines.push([{ text: '' }])
   for (const j of props.jobs) {
     lines.push(heading(j.job))
     for (const m of j.models) {

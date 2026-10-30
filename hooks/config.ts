@@ -1,3 +1,4 @@
+import type { AgentsTier } from 'cc-agents'
 import type { PluginOptions } from 'claude-code'
 
 import { isAbsolute, join, parentOf } from './paths.ts'
@@ -10,7 +11,7 @@ export function settingsFrom(options: PluginOptions): Settings {
 
 /** How one model runs a job; what it leaves out is the job's. */
 export type ModelSpec = {
-  /** The provider to run it on; absent, cc-providers picks by quota and price. */
+  /** The provider to run it on; absent, cc-agents places it by the job's `prefer`. */
   provider?: string
   effort?: string
   web?: boolean
@@ -27,6 +28,10 @@ export type JobSpec = {
   prompt: string
   /** The cc-agents kind its agents run as. */
   kind: string
+  /** The cc-agents profile its agents run as: what they may do. */
+  profile: string
+  /** The tiers its agents may run on, in the order to try them; a tier left out is never used. */
+  prefer: AgentsTier[]
   web: boolean
   helpers: boolean
   /** Whether a call must name the paths its agents may read; without any they read nothing on disk. */
@@ -55,7 +60,7 @@ export type CrewEntries = { jobs: Record<string, JobEntry> }
 /** The tools every job shares, which no job can be named. */
 const TAKEN = ['jobs', 'report', 'stop']
 const JOB_NAME = /^[a-z][a-z0-9_-]{0,63}$/
-const FIELDS: readonly (keyof JobSpec)[] = ['description', 'prompt', 'kind', 'web', 'helpers', 'paths', 'diff', 'timeoutMin', 'pokeMin', 'stallMin', 'models', 'default']
+const FIELDS: readonly (keyof JobSpec)[] = ['description', 'prompt', 'kind', 'profile', 'prefer', 'web', 'helpers', 'paths', 'diff', 'timeoutMin', 'pokeMin', 'stallMin', 'models', 'default']
 
 function fail(path: string, what: string): never {
   throw new Error(`crew: ${path}: ${what}`)
@@ -81,7 +86,8 @@ function entryOf(name: string, v: unknown, path: string): JobEntry {
   const at = `job ${name}`
   if (!JOB_NAME.test(name) || TAKEN.includes(name)) fail(path, `${at}: a job's name is its tool's, lower case, and none of ${TAKEN.join(', ')}`)
   if (!isObject(v)) fail(path, `${at} must be an object`)
-  for (const k of ['description', 'prompt', 'kind'] as const) if (v[k] !== undefined && (typeof v[k] !== 'string' || v[k] === '')) fail(path, `${at} has a ${k} that is no string`)
+  for (const k of ['description', 'prompt', 'kind', 'profile'] as const) if (v[k] !== undefined && (typeof v[k] !== 'string' || v[k] === '')) fail(path, `${at} has a ${k} that is no string`)
+  if (v.prefer !== undefined && (!isList(v.prefer) || v.prefer.length === 0)) fail(path, `${at}: prefer must be a list of tiers, in the order to try them`)
   for (const k of ['web', 'helpers', 'diff'] as const) if (v[k] !== undefined && typeof v[k] !== 'boolean') fail(path, `${at} has a ${k} that is no boolean`)
   for (const k of ['timeoutMin', 'pokeMin', 'stallMin'] as const) if (v[k] !== undefined && !isMinutes(v[k])) fail(path, `${at} has a ${k} that is no positive number of minutes`)
   if (v.paths !== undefined && v.paths !== 'required' && v.paths !== 'optional') fail(path, `${at}: paths must be "required" or "optional"`)
@@ -161,5 +167,26 @@ export type JobChoice = { ticked?: string[]; pokeMin?: Record<string, number> }
 
 /** The models a call of the job runs in this session: ticked in the tab, else the session model's, else the default. */
 export function modelsFor(job: JobSpec, sessionKey: string, choice: JobChoice | undefined): string[] {
-  return choice?.ticked ?? job.bySessionModel[sessionKey] ?? job.default
+  // a tick outlives a model taken out of the file, and the tab no longer shows it to untick
+  return choice?.ticked?.filter(m => job.models[m] !== undefined) ?? job.bySessionModel[sessionKey] ?? job.default
+}
+
+/** What is wrong between a job and the mods under it. `isBlocking`: its tool can't run at all; else one of its models can't. */
+export type JobProblem = { job: string; text: string; isBlocking: boolean }
+
+export type CrewFacts = {
+  kinds: readonly string[]
+  profiles: readonly string[]
+  missingPrompts: ReadonlySet<string>
+}
+
+/** A job's links to cc-agents and its own files; each of these stops its tool. What a model can run on is cc-providers' `checkModel`. */
+export function checkJobs(jobs: Readonly<Record<string, JobSpec>>, facts: CrewFacts): JobProblem[] {
+  return Object.entries(jobs).flatMap(([job, spec]) =>
+    [
+      ...(facts.kinds.includes(spec.kind) ? [] : [`it runs as kind ${spec.kind}, and cc-agents has ${facts.kinds.join(', ')}`]),
+      ...(facts.profiles.includes(spec.profile) ? [] : [`it runs as profile ${spec.profile}, and cc-agents has ${facts.profiles.join(', ')}`]),
+      ...(facts.missingPrompts.has(spec.prompt) ? [`its prompt ${spec.prompt} does not exist`] : []),
+    ].map(text => ({ job, text, isBlocking: true })),
+  )
 }

@@ -79,7 +79,8 @@ export type QuotaProps = { blocks: QuotaBlock[] }
 /** A job's models: `isTicked` where a call runs it in this session, and after how many minutes an idle conversation hears. */
 export type JobRow = { job: string; models: { model: string; isTicked: boolean; pokeMin: number }[] }
 
-export type JobsProps = { jobs: JobRow[] }
+/** `problems`: what is wrong with crew's setup, as drawn lines. */
+export type JobsProps = { jobs: JobRow[]; problems: string[] }
 
 export type OverviewProps = {
   tab: Tab

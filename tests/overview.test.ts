@@ -1,18 +1,17 @@
 import { expect, test } from 'claude-code/testing'
-import type { AgentsRun } from 'cc-agents'
+import type { AgentsConversation, AgentsRun, AgentsSpent, AgentsSubagent } from 'cc-agents'
+import type { BusSpendTotal } from 'cc-bus'
 import type { ProvidersGroup, ProvidersInfo, ProvidersLimits, ProvidersPoolLimit, ProvidersQuotaSlot } from 'cc-providers'
 
-import { type ClaudeAgent, ClaudeAgents } from '../hooks/agents.ts'
 import type { JobSpec } from '../hooks/config.ts'
-import { pressAt, wrap } from '../hooks/detail.ts'
-import { detailProps } from '../hooks/register.ts'
+import { detailProps, pressAt, wrap } from '../hooks/detail.ts'
 import { OVERVIEW_COLUMNS, actionAt, logPageSize, overviewLines } from '../hooks/overview.ts'
 import type { OverviewProps, Tab } from '../hooks/overview-props.ts'
 import { gaugeColumns, type QuotaView } from '../hooks/quota.ts'
 import { emptyRecord } from '../hooks/record.ts'
 import type { JobView } from '../hooks/jobs.ts'
-import { claudeTokens, shortCount } from '../hooks/usage.ts'
-import { type ViewInput, agentDetail, badgeOf, itemsOf, jobDetail, overviewProps, usageDetail } from '../hooks/views.ts'
+import { shortCount, type Spend } from '../hooks/usage.ts'
+import { type Pools, type ViewInput, agentDetail, badgeOf, itemsOf, jobDetail, overviewProps, usageDetail, usageKeys } from '../hooks/views.ts'
 
 const AT = new Date(2026, 9, 23, 20, 7).getTime()
 const TOKENS = { in: 900_000, cached: 600_000, out: 40_000 }
@@ -21,20 +20,22 @@ function runOf(id: string, provider: string, key: string, status: AgentsRun['sta
   return {
     id,
     session: 's1',
+    serves: 'v/m',
     provider,
     key: key as AgentsRun['key'],
     kind: 'oneshot',
-    job: { dir: '/c', read: 'project', project: '/p', system: '', task: '', web: false, helpers: false, timeoutMs: 1 },
+    profile: 'read-only',
+    job: { dir: '/c', read: 'project', project: '/p', system: '', task: '', web: false, helpers: false, write: false, model: key.slice(key.indexOf('/') + 1), timeoutMs: 1 },
     status,
-    costUsd,
-    isCostEstimate: false,
+    attempts: [],
+    spent: status === 'running' ? {} : { [key]: { tokens: TOKENS, usd: costUsd, isEstimate: false } },
     followUps: 0,
     startedAt: AT,
-    ...(status === 'running' ? {} : { endedAt: AT + 78_000, tokens: TOKENS, usedModel: key.slice(key.indexOf('/') + 1) }),
+    ...(status === 'running' ? {} : { endedAt: AT + 78_000, usedModel: key.slice(key.indexOf('/') + 1) }),
   }
 }
 
-const member = (label: string, serves: string, provider: string, model: string) => ({ label, serves, provider, model, key: `${provider}/${model}`, effort: 'medium', web: false, helpers: false, timeoutMs: 1, pokeMs: 1, stallMs: 1 })
+const member = (label: string, serves: string) => ({ label, serves, effort: 'medium', web: false, helpers: false, timeoutMs: 1, pokeMs: 1, stallMs: 1 })
 
 function review(id: string, statuses: [AgentsRun['status'], AgentsRun['status']]): JobView {
   const codex = runOf(`${id}-a`, 'codex', 'codex/gpt-6.1-sol', statuses[0], statuses[0] === 'running' ? 0 : 0.38)
@@ -42,16 +43,17 @@ function review(id: string, statuses: [AgentsRun['status'], AgentsRun['status']]
   return {
     job: { id, job: 'review', title: 'the parser', createdAt: AT, session: 's1', dir: `/c/${id}`, roots: ['/p'], agents: [], skipped: [{ serves: 'zhipu/glm-5.3', why: 'closed' }], isAcked: false },
     agents: [
-      { entry: { ...member('A', 'openai/gpt-6.1-sol', 'codex', 'gpt-6.1-sol'), agent: codex.id, findings: 1 }, run: codex, status: codex.status, ...(codex.status === 'running' ? { reading: { text: 'waiting on WebFetch https://x for 12m', isStalled: true, mark: 'm' } } : {}) },
-      { entry: { ...member('B', 'anthropic/claude-opus-5-5', 'claude', 'opus'), agent: claude.id, findings: 1 }, run: claude, status: claude.status },
+      { entry: { ...member('A', 'openai/gpt-6.1-sol'), agent: codex.id, findings: 1 }, run: codex, status: codex.status, ...(codex.status === 'running' ? { reading: { text: 'waiting on WebFetch https://x for 12m', isStalled: true, mark: 'm' } } : {}) },
+      { entry: { ...member('B', 'anthropic/claude-opus-5-5'), agent: claude.id, findings: 1 }, run: claude, status: claude.status },
     ],
   }
 }
 
-const AGENTS: ClaudeAgent[] = [
-  { id: 'a1', type: 'Explore', description: 'find the parser', model: 'claude-sonnet-5-5', key: 'claude/sonnet', startedAt: AT + 60_000, status: 'running', usd: 0, isEstimate: false },
+const AGENTS: AgentsSubagent[] = [
+  { id: 'a1', session: 's1', type: 'Explore', description: 'find the parser', model: 'claude-sonnet-5-5', key: 'claude/sonnet', startedAt: AT + 60_000, status: 'running', isLive: true, spent: {} },
   {
     id: 'a2',
+    session: 's1',
     type: 'general-purpose',
     description: 'review:bugs',
     workflow: 'wf_1',
@@ -60,9 +62,8 @@ const AGENTS: ClaudeAgent[] = [
     startedAt: AT + 30_000,
     endedAt: AT + 90_000,
     status: 'completed',
-    tokens: { in: 50_000, cached: 40_000, out: 2_000 },
-    usd: 0.24,
-    isEstimate: false,
+    isLive: false,
+    spent: { 'claude/opus': { tokens: { in: 50_000, cached: 40_000, out: 2_000 }, usd: 0.24, isEstimate: false } },
   },
 ]
 
@@ -72,10 +73,20 @@ const GROUPS: ProvidersGroup[] = [
   { id: 'agy-gemini', name: 'Gemini', provider: 'antigravity', models: ['gemini-3.8-flash'] },
 ]
 
+/** As cc-providers answers `poolOf` for this catalog. */
+function placedIn(key: string) {
+  const cut = key.indexOf('/')
+  const ofProvider = GROUPS.filter(g => g.provider === key.slice(0, cut))
+  const placed = ofProvider.find(g => g.models.includes(key.slice(cut + 1)))
+  return { pool: (placed ?? ofProvider[0])?.id ?? null, isPlaced: placed !== undefined }
+}
+
+const poolsFor = (jobs: readonly JobView[], agents: readonly AgentsSubagent[]): Pools => new Map(usageKeys(jobs, agents).map(key => [key, placedIn(key)]))
+
 const role = (limitUsd: number | null, spentUsd: number) => ({ limitUsd, spentUsd, raisedUsd: 0, isOver: limitUsd !== null && spentUsd >= limitUsd })
 
-function pool(id: string, name: string, provider: string, main: ReturnType<typeof role>, helpers: ReturnType<typeof role>, pausedAt: number | null = null): ProvidersPoolLimit {
-  return { pool: id, name, provider, isClosed: false, pausedAt, main, helpers }
+function pool(id: string, name: string, provider: string, main: ReturnType<typeof role>, helpers: ReturnType<typeof role>, reachedAt: number | null = null): ProvidersPoolLimit {
+  return { pool: id, name, provider, isClosed: false, reachedAt, main, helpers }
 }
 
 const LIMITS: ProvidersLimits = {
@@ -112,9 +123,42 @@ const QUOTA: QuotaView[] = [
 
 const JOBS = [review('r1', ['running', 'ok']), review('r0', ['ok', 'stopped'])]
 const CREW: Record<string, JobSpec> = {
-  review: { description: 'd', prompt: '/p.md', kind: 'oneshot', web: false, helpers: false, paths: 'required', diff: true, timeoutMin: 60, pokeMin: 20, stallMin: 10, models: { 'v/fast': {}, 'v/deep': {}, 'anthropic/claude-sonnet-5-5': { pokeMin: 40 } }, default: ['v/fast'], bySessionModel: { 'claude/opus': ['v/deep'] } },
+  review: { description: 'd', prompt: '/p.md', kind: 'oneshot', profile: 'read-only', prefer: ['quota'], web: false, helpers: false, paths: 'required', diff: true, timeoutMin: 60, pokeMin: 20, stallMin: 10, models: { 'v/fast': {}, 'v/deep': {}, 'anthropic/claude-sonnet-5-5': { pokeMin: 40 } }, default: ['v/fast'], bySessionModel: { 'claude/opus': ['v/deep'] } },
 }
-const CHAT = { in: 1_200_000, cached: 1_000_000, out: 30_000 }
+const CHAT: AgentsConversation = { turns: 7, spent: { 'claude/opus': { tokens: { in: 1_200_000, cached: 1_000_000, out: 30_000 }, usd: 4.5, isEstimate: false } } }
+
+function total(all: readonly AgentsSpent[]): BusSpendTotal {
+  const reported = all.flatMap(s => (s.tokens === undefined ? [] : [s.tokens]))
+  const tokens = reported.reduce((a, t) => ({ in: a.in + t.in, cached: a.cached + t.cached, out: a.out + t.out }), { in: 0, cached: 0, out: 0 })
+  return { usd: all.reduce((n, s) => n + s.usd, 0), isEstimate: all.some(s => s.isEstimate), ...(reported.length === 0 ? {} : { tokens }) }
+}
+
+function totals(entries: readonly (readonly [string, AgentsSpent])[]): Record<string, BusSpendTotal> {
+  const parts = new Map<string, AgentsSpent[]>()
+  for (const [name, spent] of entries) parts.set(name, [...(parts.get(name) ?? []), spent])
+  return Object.fromEntries([...parts].map(([name, all]) => [name, total(all)]))
+}
+
+/** As cc-agents answers the bus's `spend` for these. */
+function spendFor(jobs: readonly JobView[], agents: readonly AgentsSubagent[], chat: AgentsConversation = CHAT): Spend {
+  const holders: { id: string; group?: string; spent: Record<string, AgentsSpent> }[] = [
+    ...jobs.flatMap(v => v.agents.flatMap(r => (r.run === undefined ? [] : [{ id: r.run.id, group: `${v.job.session}/${v.job.id}`, spent: r.run.spent }]))),
+    ...agents.map(a => ({ id: a.id, spent: a.spent })),
+  ]
+  const spends = holders.flatMap(h => Object.entries(h.spent).map(([key, s]) => ({ id: h.id, group: h.group, key, s })))
+  return {
+    topic: 'spend',
+    chat: { ...total(Object.values(chat.spent)), turns: chat.turns },
+    agents: totals(spends.map(x => [x.id, x.s] as const)),
+    groups: totals(spends.flatMap(x => (x.group === undefined ? [] : [[x.group, x.s] as const]))),
+    keys: totals(spends.map(x => [x.key, x.s] as const)),
+    pools: totals(spends.flatMap(x => {
+      const { pool } = placedIn(x.key)
+      return pool === null ? [] : [[pool, x.s] as const]
+    })),
+    by: 'cc-agents',
+  }
+}
 
 function viewOf(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = null): ViewInput {
   return {
@@ -124,14 +168,17 @@ function viewOf(tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] =
     now: AT + 252_000,
     opened,
     groups: GROUPS,
+    pools: poolsFor(JOBS, AGENTS),
     jobs: JOBS,
     agents: AGENTS,
-    record: { ...emptyRecord(), turns: 7, main: CHAT, jobs: { review: { pokeMin: { 'v/fast': 35 } } } },
+    spend: spendFor(JOBS, AGENTS),
+    record: { ...emptyRecord(), jobs: { review: { pokeMin: { 'v/fast': 35 } } } },
     limits: LIMITS,
     gates: GATES,
     quota: QUOTA,
     crew: CREW,
     sessionKey: 'claude/opus',
+    problems: [],
   }
 }
 
@@ -139,8 +186,7 @@ const props = (tab: Tab, rows = 40, page = 0, opened: OverviewProps['opened'] = 
 
 const text = (p: OverviewProps) => overviewLines(p).map(line => line.map(s => s.text).join(''))
 
-test("a Claude turn's usage reads as tokens in, cache reads and writes included, and out", () => {
-  expect(claudeTokens({ input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 50, cache_creation: { ephemeral_1h_input_tokens: 50 }, output_tokens: 5 })).toEqual({ in: 160, cached: 100, written: 50, written1h: 50, out: 5 })
+test('counts read short', () => {
   expect(shortCount(950)).toBe('950')
   expect(shortCount(837_400)).toBe('837k')
   expect(shortCount(1_240_000)).toBe('1.2M')
@@ -181,6 +227,14 @@ test("Jobs: each job's models ticked as a call runs them in this session, with t
   expect(actionAt(p, lines[3]!.indexOf('+5'), 3)).toEqual({ poke: { job: 'review', model: 'v/fast', by: 5 } })
 })
 
+test("Jobs: what is wrong with crew's setup comes first, wrapped to the drawer", () => {
+  const long = 'review: its prompt /a/very/long/path/that/goes/past/one/line/of/the/drawer/prompts/review.md does not exist'
+  const lines = text(overviewProps({ ...viewOf('jobs', 40, 0, null), problems: [long] }))
+  expect(lines[2]).toStartWith('review: its prompt')
+  expect(lines.map(l => [...l].length)).toEqual(lines.map(() => OVERVIEW_COLUMNS))
+  expect(lines.findIndex(l => l.startsWith('review  '))).toBeGreaterThan(3)
+})
+
 test("Usage: this chat as providers metered it, then each pool with its models under it, in $ at API prices; a pool's or model's row opens it", () => {
   const p = props('usage')
   const lines = text(p)
@@ -194,16 +248,25 @@ test("Usage: this chat as providers metered it, then each pool with its models u
   expect(actionAt(p, 0, 4)).toBe(null)
   expect(actionAt(p, 0, 5)).toEqual({ open: { group: 'claude' } })
   expect(actionAt(p, 0, 6)).toEqual({ open: { model: 'claude/opus' } })
-  const items = itemsOf(GROUPS, JOBS, AGENTS)
-  const detail = usageDetail(GROUPS, items, LIMITS, { model: 'claude/opus' }, AT + 252_000)
+  const pools = poolsFor(JOBS, AGENTS)
+  const items = itemsOf(pools, JOBS, AGENTS)
+  const spend = spendFor(JOBS, AGENTS)
+  const detail = usageDetail(pools, items, LIMITS, { model: 'claude/opus' }, AT + 252_000, spend)
   expect(detail).toStartWith('3 runs · $11.44 at API prices\nClaude pool this session: helpers $11.44 of $1.00; chat $4.50 of $20.00\nTokens: 610k new · 1.2M cached · 82k out\n')
   expect(detail).toContain('20:07 workflow: review:bugs\n└ completed, 1:00 · 10k new · 40k cached · 2k out · $0.24')
   expect(detail).toContain('20:07 r0: the parser (B)\n└ stopped, 1:18')
-  expect(usageDetail(GROUPS, items, LIMITS, { group: 'claude' }, AT)).toContain('20:07 r1: the parser (B) · opus')
+  expect(usageDetail(pools, items, LIMITS, { group: 'claude' }, AT, spend)).toContain('20:07 r1: the parser (B) · opus')
+})
+
+test("a model whose provider is gone from the config counts under that provider's name; one drawn with no pool read is a bug, and says so", () => {
+  const gone = [{ ...AGENTS[1]!, key: 'old/m' as const, spent: { 'old/m': { usd: 1, isEstimate: false } } }]
+  expect(itemsOf(new Map([['old/m', { pool: null, isPlaced: false }]]), [], gone)[0]).toMatchObject({ group: 'old', isGuessed: true })
+  expect(() => itemsOf(new Map(), [], gone)).toThrow('crew: old/m was drawn without its pool being read')
 })
 
 test('Usage marks a model priced at its dearest, or that no pool places, as an upper bound', () => {
-  const lines = text(overviewProps({ ...viewOf('usage'), agents: [{ ...AGENTS[1]!, key: 'claude/fable' }, { ...AGENTS[1]!, id: 'a3', isEstimate: true }] }))
+  const agents: AgentsSubagent[] = [{ ...AGENTS[1]!, key: 'claude/fable', spent: { 'claude/fable': { usd: 1, isEstimate: false } } }, { ...AGENTS[1]!, id: 'a3', spent: { 'claude/opus': { usd: 1, isEstimate: true } } }]
+  const lines = text(overviewProps({ ...viewOf('usage'), agents, pools: poolsFor(JOBS, agents) }))
   expect(lines.some(l => /^ {2}fable \? +1/.test(l))).toBe(true)
   expect(lines.some(l => /^ {2}opus \? +3/.test(l))).toBe(true)
   expect(lines.some(l => l.startsWith('? priced at the dearest it could be'))).toBe(true)
@@ -236,7 +299,7 @@ test('Log pages when it runs past the drawer, its header on every page', () => {
 })
 
 test("Limits: an on switch, each pool's helpers and its chat where it has a limit, raises, a pause shown, and a switch per gate", () => {
-  const paused = { ...LIMITS, pools: [{ ...LIMITS.pools[0]!, pausedAt: AT }, ...LIMITS.pools.slice(1)] }
+  const paused = { ...LIMITS, pools: [{ ...LIMITS.pools[0]!, reachedAt: AT }, ...LIMITS.pools.slice(1)] }
   const p = overviewProps({ ...viewOf('limits'), limits: paused })
   const lines = text(p)
   expect(lines[2]).toContain('▐● on▌')
@@ -275,13 +338,13 @@ test("Quota: each provider's pools and windows with what is left and when it res
 test("a job's and an agent's details: when, how it went, which model each agent was, what it spent, then the brief or the prompt", () => {
   const r = review('r0', ['ok', 'stopped'])
   r.agents[0]!.run = { ...r.agents[0]!.run!, cacheUntil: new Date(2026, 9, 23, 21, 8).getTime() }
-  const shown = jobDetail(r, 'Review the parser.')
+  const shown = jobDetail(r, 'Review the parser.', spendFor([r], []))
   expect(shown).toContain('Started 20:07 · took 1:18 · 1 ok · 1 stop')
   expect(shown).toContain('A codex (gpt-6.1-sol · medium): ok, 1:18 · 300k new · 600k cached · 40k out · $0.38 · 1 finding · cache warm until 21:08')
   expect(shown).toContain('Not run, zhipu/glm-5.3: closed')
   expect(shown).toContain('Report: /c/r0')
   expect(shown).toMatch(/── Brief ──\nReview the parser\.$/)
-  const agent = agentDetail(AGENTS[1]!, 'Find bugs.', AT)
+  const agent = agentDetail(AGENTS[1]!, 'Find bugs.', AT, spendFor([], AGENTS))
   expect(agent).toContain('general-purpose on claude-opus-5-5 · completed')
   expect(agent).toContain('Tokens: 10k new · 40k cached · 2k out · $0.24')
   expect(agent).toContain('Workflow run wf_1')
@@ -292,29 +355,27 @@ test('the tab badge counts job agents and agents running plus pools at a limit: 
   const roomy = { ...LIMITS, pools: LIMITS.pools.map(p => ({ ...p, helpers: role(100, 0) })) }
   expect(badgeOf(JOBS, AGENTS, roomy)).toEqual({ count: 2, level: 'info' })
   expect(badgeOf(JOBS, AGENTS, LIMITS)).toEqual({ count: 3, level: 'attention' })
-  expect(badgeOf(JOBS, AGENTS, { ...LIMITS, pools: [{ ...LIMITS.pools[0]!, pausedAt: AT }] })).toEqual({ count: 3, level: 'urgent' })
+  expect(badgeOf(JOBS, AGENTS, { ...LIMITS, pools: [{ ...LIMITS.pools[0]!, reachedAt: AT }] })).toEqual({ count: 3, level: 'urgent' })
   expect(badgeOf(JOBS, AGENTS, { ...LIMITS, isOn: false })).toEqual({ count: 2, level: 'info' })
   expect(badgeOf([], [], roomy)).toEqual({ count: 0, level: 'info' })
 })
 
-test("Claude's agents run until their turn ends and sum what each turn spent and cost; a kept one the engine no longer lists has ended", () => {
-  const agents = new ClaudeAgents()
-  agents.started({ id: 'a1', type: 'Explore', description: 'look', key: 'claude/sonnet', startedAt: 0 })
-  agents.started({ id: 'w1', type: 'general-purpose', description: 'review:bugs', workflow: 'wf_1', key: 'claude/opus', startedAt: 0 })
-  expect(agents.keyOf('a1')).toBe('claude/sonnet')
-  expect(agents.finished('a1', { isAnswer: true, tokens: { in: 10, cached: 0, out: 2 }, usd: 0.1, isEstimate: false, at: 5 })).toBe(true)
-  expect(agents.finished('nobody', { isAnswer: true, usd: 0, isEstimate: false, at: 5 })).toBe(false)
-  agents.refresh([{ id: 'a1', description: 'look', type: 'Explore', status: 'running' }])
-  expect(agents.finished('a1', { isAnswer: false, tokens: { in: 5, cached: 1, out: 1 }, usd: 0.05, isEstimate: true, at: 9 })).toBe(true)
-  expect(agents.all().map(a => [a.id, a.status, a.tokens, a.endedAt, a.usd.toFixed(2), a.isEstimate])).toEqual([
-    ['a1', 'failed', { in: 15, cached: 1, out: 3 }, 9, '0.15', true],
-    ['w1', 'running', undefined, undefined, '0.00', false],
+test('a run that spent on two models shows under each, in its pool, and adds up in its own row', () => {
+  const one = { tokens: { in: 100, cached: 0, out: 10 }, usd: 1, isEstimate: false }
+  const two = { tokens: { in: 50, cached: 10, out: 5 }, usd: 2, isEstimate: true }
+  const run = { ...runOf('x', 'codex', 'codex/gpt-6.1-sol', 'ok', 0), spent: { 'codex/gpt-6.1-sol': one, 'claude/opus': two } }
+  const view: JobView = { job: { ...review('r9', ['ok', 'ok']).job }, agents: [{ entry: { ...member('A', 'v/m'), agent: run.id }, run, status: 'ok' }] }
+  const items = itemsOf(poolsFor([view], []), [view], [])
+  expect(items.map(i => [i.key, i.group, i.usd, i.isGuessed])).toEqual([
+    ['codex/gpt-6.1-sol', 'codex', 1, false],
+    ['claude/opus', 'claude', 2, true],
   ])
-  const again = new ClaudeAgents()
-  again.restore(agents.all(), [])
-  expect(again.all().map(a => a.status)).toEqual(['failed', 'killed'])
-  again.restore(agents.all(), [{ id: 'w1', description: 'review:bugs', type: 'general-purpose', status: 'running' }])
-  expect(again.all().map(a => a.status)).toEqual(['failed', 'running'])
+  expect(jobDetail(view, '', spendFor([view], []))).toContain('140 new · 10 cached · 15 out · $3.00 at most')
+})
+
+test('an agent yet to spend lists under the model it runs on, at nothing', () => {
+  const items = itemsOf(poolsFor([], [AGENTS[0]!]), [], [AGENTS[0]!])
+  expect(items.map(i => [i.key, i.usd, i.tokens])).toEqual([['claude/sonnet', 0, undefined]])
 })
 
 test('a brief wraps at spaces, and a word longer than a line is cut', () => {

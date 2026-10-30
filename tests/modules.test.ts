@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { effective, mergeCrew, modelsFor, parseCrewFile, settingsFrom } from '../hooks/config.ts'
+import { checkJobs, effective, mergeCrew, modelsFor, parseCrewFile, settingsFrom } from '../hooks/config.ts'
 import { readingOf } from '../hooks/liveness.ts'
 import { systemPrompt, taskText } from '../hooks/prompt.ts'
 import { fullReport, merge, parseAnswer, scopeList, scopeReport } from '../hooks/report.ts'
@@ -48,6 +48,8 @@ const SHIPPED = JSON.stringify({
       description: 'Review.',
       prompt: 'prompts/review.md',
       kind: 'oneshot',
+      profile: 'read-only',
+      prefer: ['quota', 'unread'],
       web: false,
       helpers: false,
       paths: 'required',
@@ -74,7 +76,7 @@ test("a prompt is found from its crew file's folder; a machine's own file change
 
 test('a crew file that leaves a job short, runs a model it does not list, or takes a shared tool\'s name is refused, naming the file', () => {
   const shipped = parseCrewFile(SHIPPED, '/crew.json')
-  expect(() => mergeCrew({ jobs: { x: { kind: 'oneshot' } } }, null, '/w')).toThrow('crew: /w: job x needs description, prompt, web, helpers, paths, diff, timeoutMin, pokeMin, stallMin, models, default')
+  expect(() => mergeCrew({ jobs: { x: { kind: 'oneshot' } } }, null, '/w')).toThrow('crew: /w: job x needs description, prompt, profile, prefer, web, helpers, paths, diff, timeoutMin, pokeMin, stallMin, models, default')
   expect(() => mergeCrew(shipped, { jobs: { review: { default: ['v/ghost'] } } }, '/w')).toThrow('crew: /w: job review runs v/ghost, none of its models (v/fast, v/deep)')
   expect(() => mergeCrew(shipped, { jobs: { review: { default: [] } } }, '/w')).toThrow('crew: /w: job review needs a model in default')
   expect(() => parseCrewFile('{ "jobs": { "report": {} } }', '/c.json')).toThrow('crew: /c.json: job report: a job\'s name is its tool\'s, lower case, and none of jobs, report, stop')
@@ -93,16 +95,60 @@ test("a model's settings stand over the job's and the tab's poke over both; the 
   expect(modelsFor(job, 'claude/haiku', undefined)).toEqual(['v/fast'])
   expect(modelsFor(job, 'claude/opus', undefined)).toEqual(['v/deep', 'v/fast'])
   expect(modelsFor(job, 'claude/opus', { ticked: [] })).toEqual([])
+  expect(modelsFor(job, 'claude/opus', { ticked: ['v/gone', 'v/fast'] })).toEqual(['v/fast'])
 })
 
-const MIN = 60_000
+test('the check of the jobs finds a kind, a profile or a prompt that does not line up; each stops its job', () => {
+  const { review } = mergeCrew(parseCrewFile(SHIPPED, '/crew.json'), null, '/w').jobs
+  const facts = { kinds: ['oneshot'], profiles: ['read-only'], missingPrompts: new Set<string>() }
+  expect(checkJobs({ review: review! }, facts)).toEqual([])
+  expect(checkJobs({ review: { ...review!, kind: 'nosuch', profile: 'root' } }, { ...facts, missingPrompts: new Set([review!.prompt]) })).toEqual([
+    { job: 'review', text: 'it runs as kind nosuch, and cc-agents has oneshot', isBlocking: true },
+    { job: 'review', text: 'it runs as profile root, and cc-agents has read-only', isBlocking: true },
+    { job: 'review', text: `its prompt ${review!.prompt} does not exist`, isBlocking: true },
+  ])
+})
 
-test('an agent reads as working until one call or its silence passes the stall limit, the oldest call told first; a run gone reads as ending', () => {
-  const at = 1000 * MIN
-  const open = (minutesAgo: number, target = '') => ({ tool: 'WebFetch', target, since: at - minutesAgo * MIN })
-  expect(readingOf({ lastAt: at, steps: 2, open: [] }, 10 * MIN, at)).toEqual({ text: 'working, 2 steps done', isStalled: false, mark: '' })
-  expect(readingOf({ lastAt: at, steps: 0, open: [open(3)] }, 10 * MIN, at)).toEqual({ text: 'working: WebFetch', isStalled: false, mark: '' })
-  expect(readingOf({ lastAt: at, steps: 0, open: [open(1), open(12, 'https://a')] }, 10 * MIN, at)).toEqual({ text: 'waiting on WebFetch https://a for 12m', isStalled: true, mark: `open:WebFetch:${at - 12 * MIN}` })
-  expect(readingOf({ lastAt: at - 11 * MIN, steps: 4, open: [] }, 10 * MIN, at)).toEqual({ text: 'no output for 11m', isStalled: true, mark: `silent:${at - 11 * MIN}` })
-  expect(readingOf(null, 10 * MIN, at)).toEqual({ text: 'ending', isStalled: false, mark: '' })
+test('a job must say how it prefers its models', () => {
+  const job = JSON.stringify({ jobs: { review: { prefer: [] } } })
+  expect(() => parseCrewFile(job, '/crew.json')).toThrow('crew: /crew.json: job review: prefer must be a list of tiers, in the order to try them')
+})
+
+test('crew words how cc-agents says an agent stands', () => {
+  expect(readingOf(null)).toEqual({ text: 'ending', isStalled: false, mark: '' })
+  expect(readingOf({ state: 'ending' })).toEqual({ text: 'ending', isStalled: false, mark: '' })
+  expect(readingOf({ state: 'working', steps: 2 })).toEqual({ text: 'working, 2 steps done', isStalled: false, mark: '' })
+  expect(readingOf({ state: 'working', steps: 1 }).text).toBe('working, 1 step done')
+  expect(readingOf({ state: 'working', steps: 0, tool: 'WebFetch' })).toEqual({ text: 'working: WebFetch', isStalled: false, mark: '' })
+  expect(readingOf({ state: 'stalled', on: { tool: 'WebFetch', target: 'https://a' }, forMs: 720_000, mark: 'm1' })).toEqual({ text: 'waiting on WebFetch https://a for 12m', isStalled: true, mark: 'm1' })
+  expect(readingOf({ state: 'stalled', on: { tool: 'list_dir', target: '' }, forMs: 720_000, mark: 'm2' }).text).toBe('waiting on list_dir for 12m')
+  expect(readingOf({ state: 'stalled', forMs: 660_000, mark: 'm3' })).toEqual({ text: 'no output for 11m', isStalled: true, mark: 'm3' })
+})
+
+test("config merging: a machine's job joins the shipped ones, its prompt found from its own file, and a model both name is the machine's whole", () => {
+  const own = parseCrewFile(
+    JSON.stringify({
+      jobs: {
+        audit: { description: 'Audit.', prompt: 'mine/audit.md', kind: 'oneshot', profile: 'read-only', prefer: ['quota'], web: false, helpers: false, paths: 'required', diff: false, timeoutMin: 5, pokeMin: 5, stallMin: 5, models: { 'v/fast': {} }, default: ['v/fast'] },
+        review: { models: { 'v/deep': { effort: 'low' } }, bySessionModel: { 'claude/haiku': ['v/fast'] } },
+      },
+    }),
+    '/own/crew.json',
+  )
+  const crew = mergeCrew(parseCrewFile(SHIPPED, '/ship/crew.json'), own, '/w')
+  expect(Object.keys(crew.jobs)).toEqual(['review', 'audit'])
+  expect(crew.jobs['audit']!.prompt).toBe('/own/mine/audit.md')
+  expect(crew.jobs['review']!.prompt).toBe('/ship/prompts/review.md')
+  expect(crew.jobs['review']!.models['v/deep']).toEqual({ effort: 'low' })
+  expect(crew.jobs['review']!.models['v/fast']).toEqual({})
+  expect(modelsFor(crew.jobs['review']!, 'claude/haiku', undefined)).toEqual(['v/fast'])
+  // a job's fields are replaced whole, so the machine's list stands in for the shipped one
+  expect(modelsFor(crew.jobs['review']!, 'claude/opus', undefined)).toEqual(['v/fast'])
+})
+
+test('an answer whose findings are not findings is no answer, so it is shown as it came rather than half counted', () => {
+  const scope = (findings: unknown) => JSON.stringify({ scopes: [{ scope: 'x', report: 'r', findings, references: [] }], not_read: [] })
+  expect(parseAnswer(scope('none'))).toBeUndefined()
+  expect(parseAnswer(scope([{ title: 1 }]))).toBeUndefined()
+  expect(parseAnswer(scope([{ title: 't' }]))).toBeUndefined()
 })

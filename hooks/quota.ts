@@ -28,7 +28,7 @@ const left = (w: ProvidersWindowReading | undefined) => (w === undefined || w.pe
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 /** `19:54` within the next day, the weekday after that. */
-export function resetText(resetsAt: number | null, now: number): string {
+function resetText(resetsAt: number | null, now: number): string {
   if (resetsAt === null) return '?'
   return resetsAt - now >= 24 * 3600_000 ? WEEKDAYS[new Date(resetsAt).getDay()]! : clockText(resetsAt)
 }
