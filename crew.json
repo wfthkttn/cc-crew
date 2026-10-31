@@ -1,7 +1,7 @@
 {
   "jobs": {
     "review": {
-      "description": "Use this whenever you need a review of code, a change, a design or a document: other models do it independently. Say what to review, what matters, and what you already know or suspect is out of scope.",
+      "description": "Use this whenever you need a review of code, a change, a design or a document. Say what to review, what matters, and what you already know or suspect is out of scope.",
       "prompt": "prompts/review.md",
       "kind": "oneshot",
       "profile": "read-only",
@@ -27,7 +27,7 @@
       }
     },
     "research": {
-      "description": "Use this whenever you need to search for something or find something out: other models go wide across sources and check each claim at its source. Say what you need to know, why, and what you already know.",
+      "description": "Use this whenever you need to search for something or find something out: its agents go wide across sources and check each claim at its source. Say what you need to know, why, and what you already know.",
       "prompt": "prompts/research.md",
       "kind": "oneshot",
       "profile": "read-only",
